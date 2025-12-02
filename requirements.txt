@@ -1,0 +1,10 @@
+click
+httpx
+asyncpg
+python-dotenv
+pydantic
+redis[async]
+ebooklib
+beautifulsoup4
+Pillow
+pyyaml

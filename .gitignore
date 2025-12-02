@@ -1,0 +1,53 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Bytecode / compiled
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Packaging / build artefacts
+build/
+dist/
+pip-wheel-metadata/
+*.egg-info/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage*
+
+# Editors / IDE
+.idea/
+.vscode/
+*.code-workspace
+
+# Environment files
+.env
+n8n/.env
+src/.env
+
+# Logs
+logs/
+*.log
+processing.log
+
+# Local data & generated content
+data/
+database/
+n8n/data/
+*.epub
+*.pdf
+
+# System files
+.DS_Store
+Thumbs.db

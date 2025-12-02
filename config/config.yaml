@@ -1,0 +1,38 @@
+# General application settings
+app:
+  name: SortBook v5
+  text_preview_chars: 10000
+  request_timeout: 180
+
+paths:
+  book_sources: "/home/antares/project/livres"
+  book_target: "/home/antares/project/livres_sorted"
+  epub_directory: "/home/antares/project/livres"
+
+database:
+  dsn: "postgresql://user:password@localhost:5432/sortbook_db"
+
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+
+services:
+  n8n:
+    base_url: "https://n8n.antares.local"
+    isbn_path: "/webhook-test/isbn-lookup"
+    metadata_path: "/webhook-test/metadata-lookup"
+  flowise:
+    base_url: "https://flowise.antares.local"
+    check_flow_id: "your_flowise_check_flow_id"
+    cover_flow_id: "your_flowise_cover_flow_id"
+
+commands:
+  run:
+    dry_run: false
+    test_file:
+    limit: 0
+    offset: 0
+    use_redis: false
+    verbose: false
+    reset: false
