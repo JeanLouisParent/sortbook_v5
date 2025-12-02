@@ -39,7 +39,6 @@ src/.env
 # Logs
 logs/
 *.log
-processing.log
 
 # Local data & generated content
 data/

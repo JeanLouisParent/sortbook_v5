@@ -41,6 +41,38 @@ C'est le cœur du système. Un script en ligne de commande (`src/main.py`) orche
 -   **Exemples de workflows** :
     -   **Recherche par ISBN** : Prend un ISBN en entrée, interroge des APIs publiques (Google Books, OpenLibrary, etc.) et retourne une structure JSON standardisée avec le titre, l'auteur, la date de publication, etc.
     -   **Recherche par métadonnées** : Prend un titre et un auteur, effectue une recherche textuelle sur les mêmes APIs et retourne les meilleures correspondances.
+-   **Schéma de réponse attendu** : Chaque workflow (N8N ou Flowise) doit renvoyer un JSON respectant la structure suivante, afin d'être consommé correctement par `src/main.py` :
+
+    ```json
+    {
+      "success": true,
+      "source": "n8n_isbn",              // identifie le workflow (n8n_isbn, n8n_metadata, flowise_check, flowise_cover…)
+      "payload": {
+        "title": "Titre proposé",
+        "author": "Auteur proposé",
+        "language": "fr",                // champs additionnels optionnels
+        "publisher": "Maison d'édition",
+        "published_at": "2020-05-01",
+        "confidence": 0.82,              // score facultatif (0-1)
+        "extra": { ... }                 // zone libre pour des données spécifiques au workflow
+      },
+      "errors": [],                      // liste de messages en cas d'échec
+      "raw": { ... }                     // réponse brute éventuelle pour debug
+    }
+    ```
+
+    - `success`: booléen obligatoire. `false` signifie que le workflow n'a pas produit de résultat exploitable.
+    - `source`: permet au pipeline d'identifier l'origine des données.
+    - `payload.title` / `payload.author`: champs prioritaires utilisés pour décider du titre/auteur final. Si `success=true`, ces champs devraient être présents.
+    - `errors`: utile pour tracer les problèmes. Si `success=false`, la CLI les logge.
+    - `raw`: facultatif, mais pratique pour garder la réponse originale (non stockée si elle contient des données sensibles).
+
+    Toute évolution de ce format doit être synchronisée entre les workflows et le client Python.
+-   **Stratégie d'appel** :
+    1. Si un ISBN normalisé est extrait, le workflow `n8n_isbn` est appelé en premier avec : l'ISBN principal, la liste complète des ISBN candidats, les métadonnées brutes et le nom de fichier.
+    2. Si `n8n_isbn` renvoie `success: true`, les données retournées sont utilisées pour finaliser le traitement (aucun autre workflow n'est appelé).
+    3. Si aucun ISBN n'est trouvé ou si `n8n_isbn` échoue (`success: false`), le workflow `n8n_metadata` est appelé avec les métadonnées brutes et le nom du fichier.
+    4. L'intégration Flowise (check / cover) pourra être branchée suivant les mêmes règles de format lorsque nécessaire.
 -   **Déploiement** : Tourne dans un conteneur Docker et ses données sont persistées dans le dossier `data/n8n/`.
 
 ### 3. PostgreSQL (Base de données)

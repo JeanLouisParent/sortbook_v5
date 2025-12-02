@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # ISBN Regex
 ISBN_REGEX = re.compile(r"(?:ISBN(?:-1[03])?[:\s]?)?((?:97[89][-\s]?)?\d{1,5}[-\s]?\d{1,7}[-\s]?\d{1,6}[-\s]?\d{1,6}[-\s]?[\dX])")
 
+def _normalize_isbn(value: str) -> str:
+    """Normalize ISBN by removing separators and uppercasing."""
+    return value.replace("-", "").replace(" ", "").replace(":", "").upper()
+
 # --- Hashing ---
 
 def get_file_hash(file_path: Path) -> str:
@@ -80,7 +84,7 @@ def extract_cover(file_path: Path) -> Dict[str, Any]:
 
 def _is_valid_isbn(isbn: str) -> bool:
     """Validates an ISBN-10 or ISBN-13."""
-    isbn = isbn.replace("-", "").replace(" ", "").upper()
+    isbn = _normalize_isbn(isbn)
     if len(isbn) == 10:
         if not isbn[:-1].isdigit() or not (isbn[-1].isdigit() or isbn[-1] == 'X'):
             return False
@@ -107,8 +111,9 @@ def _find_isbns_in_text(text: str) -> List[str]:
     found_isbns = []
     for match in ISBN_REGEX.finditer(text):
         potential_isbn = match.group(1).strip()
-        if _is_valid_isbn(potential_isbn):
-            found_isbns.append(potential_isbn.replace("-", "").replace(" ", ""))
+        normalized = _normalize_isbn(potential_isbn)
+        if _is_valid_isbn(normalized):
+            found_isbns.append(normalized)
     return list(dict.fromkeys(found_isbns))
 
 def extract_isbn(file_path: Path) -> Dict[str, Any]:
@@ -121,13 +126,14 @@ def extract_isbn(file_path: Path) -> Dict[str, Any]:
         identifiers = book.get_metadata("DC", "identifier")
         for identifier, _ in identifiers:
             if "isbn" in identifier.lower() or _is_valid_isbn(identifier):
-                clean_isbn = identifier.replace("urn:isbn:", "").strip()
+                clean_isbn = _normalize_isbn(identifier.replace("urn:isbn:", "").strip())
                 if _is_valid_isbn(clean_isbn):
                     logger.debug(f"ISBN found in metadata for {file_path.name}: {clean_isbn}")
                     return {
                         "isbn": clean_isbn,
                         "isbn_source": "metadata",
-                        "all_isbns": [clean_isbn]
+                        "all_isbns": [clean_isbn],
+                        "isbn_candidates": [clean_isbn],
                     }
 
         all_found_isbns = []
@@ -147,15 +153,16 @@ def extract_isbn(file_path: Path) -> Dict[str, Any]:
             return {
                 "isbn": chosen_isbn,
                 "isbn_source": "content",
-                "all_isbns": unique_isbns
+                "all_isbns": unique_isbns,
+                "isbn_candidates": unique_isbns,
             }
 
         logger.debug(f"No ISBN found for {file_path.name}")
-        return {"isbn": None, "isbn_source": "none", "all_isbns": []}
+        return {"isbn": None, "isbn_source": "none", "all_isbns": [], "isbn_candidates": []}
 
     except Exception as e:
         logger.error(f"Error extracting ISBN from {file_path.name}: {e}")
-        return {"isbn": None, "isbn_source": "error", "all_isbns": [], "error": str(e)}
+        return {"isbn": None, "isbn_source": "error", "all_isbns": [], "isbn_candidates": [], "error": str(e)}
 
 # --- Metadata Extraction ---
 

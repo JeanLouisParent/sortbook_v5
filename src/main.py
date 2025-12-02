@@ -8,6 +8,7 @@ import logging
 import sys
 from pathlib import Path
 from typing import Optional
+import shutil
 
 # When executed directly (python src/main.py), ensure project root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -80,7 +81,22 @@ def cli():
     show_default=True,
     help="Tronque la base de données et réinitialise l'état Redis avant de démarrer.",
 )
-def run_command(dry_run: bool, test_file: Optional[str], limit: int, offset: int, use_redis: bool, verbose: bool, reset: bool):
+@click.option(
+    "--n8n-test/--no-n8n-test",
+    default=run_defaults.n8n_test,
+    show_default=True,
+    help="Utilise les webhooks de test configurés pour N8N.",
+)
+def run_command(
+    dry_run: bool,
+    test_file: Optional[str],
+    limit: int,
+    offset: int,
+    use_redis: bool,
+    verbose: bool,
+    reset: bool,
+    n8n_test: bool,
+):
     """Exécute le pipeline de traitement des fichiers EPUB."""
     setup_logging(verbose)
     
@@ -99,6 +115,7 @@ def run_command(dry_run: bool, test_file: Optional[str], limit: int, offset: int
             offset=offset,
             use_redis_state=use_redis,
             reset=reset,
+            use_n8n_test=n8n_test,
         )
     )
 
@@ -109,6 +126,7 @@ async def main_process(
     offset: int,
     use_redis_state: bool,
     reset: bool,
+    use_n8n_test: bool,
 ):
     """Coroutine principale orchestrant le traitement."""
     pool: Optional[Pool] = None
@@ -123,6 +141,11 @@ async def main_process(
                 if use_redis_state:
                     await redis_manager.connect() # Ensure redis is connected before resetting
                     await redis_manager.reset_state()
+                logs_dir = PROJECT_ROOT / "logs"
+                if logs_dir.exists():
+                    for log_file in logs_dir.glob("*"):
+                        if log_file.is_file():
+                            log_file.unlink()
             else:
                 logger.info("En mode --dry-run, la base de données ne sera pas tronquée et Redis ne sera pas réinitialisé.")
         # --- END NEW RESET LOGIC ---
@@ -155,7 +178,7 @@ async def main_process(
 
         logger.info(f"{len(files_to_process)} fichier(s) à traiter.")
 
-        async with httpx.AsyncClient(timeout=settings.request_timeout) as http_client:
+        async with httpx.AsyncClient(timeout=settings.request_timeout, verify=settings.n8n_verify_ssl) as http_client:
             tasks = []
             for file_path in files_to_process:
                 task = pipeline.run_pipeline(
@@ -164,6 +187,7 @@ async def main_process(
                     settings,
                     dry_run=dry_run,
                     test_mode=test_file_path is not None,
+                    use_n8n_test=use_n8n_test,
                     http_client=http_client,
                 )
                 tasks.append(task)

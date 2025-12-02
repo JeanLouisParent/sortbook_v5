@@ -37,9 +37,11 @@ class RedisConfig(BaseModel):
     db: int
 
 class N8NServiceConfig(BaseModel):
-    base_url: HttpUrl
+    prod_url: HttpUrl
+    test_url: HttpUrl
     isbn_path: str
     metadata_path: str
+    verify_ssl: bool = True
 
 class FlowiseServiceConfig(BaseModel):
     base_url: HttpUrl
@@ -58,6 +60,7 @@ class RunCommandConfig(BaseModel):
     use_redis: bool = False
     verbose: bool = False
     reset: bool = False
+    n8n_test: bool = False
 
 class CommandsConfig(BaseModel):
     run: RunCommandConfig = RunCommandConfig()
@@ -116,11 +119,17 @@ class Settings(BaseModel):
 
         # N8N Services
         if os.getenv("N8N_BASE_URL"):
-            config_data.setdefault("services", {}).setdefault("n8n", {})["base_url"] = os.getenv("N8N_BASE_URL")
+            config_data.setdefault("services", {}).setdefault("n8n", {})["prod_url"] = os.getenv("N8N_BASE_URL")
+        if os.getenv("N8N_PROD_URL"):
+            config_data.setdefault("services", {}).setdefault("n8n", {})["prod_url"] = os.getenv("N8N_PROD_URL")
+        if os.getenv("N8N_TEST_URL"):
+            config_data.setdefault("services", {}).setdefault("n8n", {})["test_url"] = os.getenv("N8N_TEST_URL")
         if os.getenv("N8N_ISBN_PATH"):
             config_data.setdefault("services", {}).setdefault("n8n", {})["isbn_path"] = os.getenv("N8N_ISBN_PATH")
         if os.getenv("N8N_METADATA_PATH"):
             config_data.setdefault("services", {}).setdefault("n8n", {})["metadata_path"] = os.getenv("N8N_METADATA_PATH")
+        if os.getenv("N8N_VERIFY_SSL"):
+            config_data.setdefault("services", {}).setdefault("n8n", {})["verify_ssl"] = os.getenv("N8N_VERIFY_SSL").lower() in ("1", "true", "yes")
 
         # Flowise Services
         if os.getenv("FLOWISE_BASE_URL"):
@@ -168,7 +177,7 @@ class Settings(BaseModel):
 
     @property
     def n8n_base_url(self) -> str:
-        return str(self.services.n8n.base_url)
+        return str(self.services.n8n.prod_url)
 
     @property
     def n8n_isbn_path(self) -> str:
@@ -179,8 +188,12 @@ class Settings(BaseModel):
         return self.services.n8n.metadata_path
 
     @property
+    def n8n_verify_ssl(self) -> bool:
+        return self.services.n8n.verify_ssl
+
+    @property
     def n8n_test_base_url(self) -> str:
-        return self.n8n_base_url
+        return str(self.services.n8n.test_url)
 
     @property
     def n8n_test_isbn_path(self) -> str:

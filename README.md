@@ -49,6 +49,8 @@ Pour une description plus détaillée, consultez le document d'[architecture](./
     cp src/.env.example src/.env
     # Éditez src/.env avec vos informations
     ```
+    > Astuce : si vos webhooks N8N sont servis avec un certificat auto-signé via Traefik, définissez `services.n8n.verify_ssl: false` dans `config/config.yaml` (ou `N8N_VERIFY_SSL=false` dans `src/.env`) pour autoriser les appels HTTPS.
+    > Les workflows N8N/Flowise doivent renvoyer un JSON normalisé (`success`, `source`, `payload`, etc.). Le format complet et la stratégie d'appel (ISBN d'abord, metadata en secours) sont décrits dans [doc/architecture.md](doc/architecture.md).
 
 3.  **Configuration de n8n**
 

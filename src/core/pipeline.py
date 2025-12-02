@@ -17,6 +17,13 @@ from src.tasks import extract, integrate
 
 logger = logging.getLogger(__name__)
 
+def _workflow_payload(response: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if response and response.get("success"):
+        payload = response.get("payload", {})
+        if isinstance(payload, dict):
+            return payload
+    return None
+
 class PipelineState:
     """Contient l'état et les données collectées pour un fichier."""
     def __init__(self, file_path: Path, settings: Settings):
@@ -30,14 +37,21 @@ class PipelineState:
 def _choose_final_data(state: PipelineState) -> Tuple[str, str, str]:
     """Logique de décision pour choisir le titre/auteur final."""
     # Priorité 1: Résultats du workflow N8N ISBN
-    if "json_n8n_isbn" in state.data and state.data["json_n8n_isbn"].get("data"):
-        # Supposons que n8n renvoie un objet avec 'title' et 'author'
-        isbn_data = state.data["json_n8n_isbn"]["data"]
-        title = isbn_data.get("title")
-        author = isbn_data.get("author")
+    isbn_payload = _workflow_payload(state.data.get("json_n8n_isbn"))
+    if isbn_payload:
+        title = isbn_payload.get("title")
+        author = isbn_payload.get("author")
         if title and author:
             logger.debug(f"Choix final pour {state.file_path.name}: N8N ISBN")
             return title, author, "isbn"
+
+    metadata_payload = _workflow_payload(state.data.get("json_n8n_metadata"))
+    if metadata_payload:
+        title = metadata_payload.get("title")
+        author = metadata_payload.get("author")
+        if title and author:
+            logger.debug(f"Choix final pour {state.file_path.name}: N8N metadata workflow")
+            return title, author, "n8n_metadata"
 
     # Priorité 2: Métadonnées EPUB brutes
     if "json_extract_metadata" in state.data:
@@ -61,6 +75,7 @@ async def run_pipeline(
     settings: Settings,
     dry_run: bool,
     test_mode: bool,
+    use_n8n_test: bool,
     http_client: httpx.AsyncClient,
 ):
     """
@@ -105,6 +120,7 @@ async def run_pipeline(
         if isbn_info.get("isbn"):
             state.data["isbn"] = isbn_info["isbn"]
             state.data["isbn_source"] = isbn_info["isbn_source"]
+            state.data["isbn_candidates"] = isbn_info.get("isbn_candidates") or isbn_info.get("all_isbns") or []
             if not dry_run:
                 existing_isbn = await db.find_book_by_isbn(pool, isbn_info["isbn"])
                 if existing_isbn:
@@ -114,10 +130,30 @@ async def run_pipeline(
                 
         # 6. Appels API (si non doublon)
         if state.final_status not in ["duplicate_hash", "duplicate_isbn"]:
+            metadata_payload = state.data.get("json_extract_metadata", {}).get("metadata")
+            isbn_candidates = state.data.get("isbn_candidates") or isbn_info.get("all_isbns", [])
+            metadata_should_run = False
+            isbn_response = None
             if state.data.get("isbn"):
-                state.data["json_n8n_isbn"] = await integrate.call_n8n_isbn_workflow(
-                    state.data["isbn"], settings, test_mode, http_client
+                isbn_response = await integrate.call_n8n_isbn_workflow(
+                    state.data["isbn"],
+                    settings,
+                    use_n8n_test,
+                    http_client,
+                    metadata=metadata_payload,
+                    source_filename=file_path.name,
+                    isbn_candidates=isbn_candidates,
                 )
+                state.data["json_n8n_isbn"] = isbn_response
+                metadata_should_run = not _workflow_payload(isbn_response)
+            else:
+                metadata_should_run = True  # Pas d'ISBN : on se replie sur metadata
+
+            if metadata_payload and metadata_should_run:
+                metadata_response = await integrate.call_n8n_metadata_workflow(
+                    metadata_payload, settings, use_n8n_test, http_client, file_path.name
+                )
+                state.data["json_n8n_metadata"] = metadata_response
             # Ajouter d'autres appels (metadata, flowise) ici si nécessaire...
             # Exemple:
             # if state.data["has_cover"] and cover_data.get("cover_content"):

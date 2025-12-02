@@ -8,6 +8,12 @@ Ce module met en place deux handlers :
 import logging
 from logging.handlers import RotatingFileHandler
 import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+LOG_DIR = PROJECT_ROOT / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "processing.log"
 
 
 def setup_logging(verbose: bool = False):
@@ -25,7 +31,7 @@ def setup_logging(verbose: bool = False):
         handlers=[
             # Handler pour le fichier de log
             RotatingFileHandler(
-                "processing.log", maxBytes=10 * 1024 * 1024, backupCount=5
+                LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5
             )
         ],
     )

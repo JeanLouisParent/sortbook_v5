@@ -85,6 +85,12 @@ python src/main.py run
     python src/main.py run --limit 10 # Traite les 10 premiers fichiers
     ```
 
+-   **Forcer l'utilisation des webhooks N8N de test (`--n8n-test`)** : Pratique pour valider vos workflows dans l'environnement de test défini dans `config/config.yaml`.
+
+    ```bash
+    python src/main.py run --n8n-test
+    ```
+
 -   **Utiliser Redis pour la reprise (`--use-redis`)** : Empêche de retraiter les fichiers qui ont déjà été traités lors d'exécutions précédentes.
 
     ```bash

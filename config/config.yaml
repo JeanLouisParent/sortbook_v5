@@ -19,9 +19,11 @@ redis:
 
 services:
   n8n:
-    base_url: "https://n8n.antares.local"
-    isbn_path: "/webhook-test/isbn-lookup"
-    metadata_path: "/webhook-test/metadata-lookup"
+    prod_url: "https://n8n.antares.local/webhook/"
+    test_url: "https://n8n.antares.local/webhook-test/"
+    isbn_path: "isbn-lookup"
+    metadata_path: "metadata-lookup"
+    verify_ssl: false
   flowise:
     base_url: "https://flowise.antares.local"
     check_flow_id: "your_flowise_check_flow_id"
@@ -29,10 +31,11 @@ services:
 
 commands:
   run:
-    dry_run: false
+    dry_run: true
     test_file:
     limit: 0
     offset: 0
     use_redis: false
     verbose: false
-    reset: false
+    reset: true
+    n8n_test: false
