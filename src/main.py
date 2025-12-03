@@ -7,7 +7,7 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any, Dict
 import shutil
 
 # When executed directly (python src/main.py), ensure project root is on sys.path
@@ -28,6 +28,49 @@ from src.core.state import RedisStateManager
 logger = logging.getLogger(__name__)
 run_defaults = settings.commands.run
 _RUN_TEST_FILE_DEFAULT = str(run_defaults.test_file) if run_defaults.test_file else None
+
+
+def _purge_logs():
+    logs_dir = PROJECT_ROOT / "logs"
+    if logs_dir.exists():
+        for log_file in logs_dir.glob("*"):
+            if log_file.is_file():
+                log_file.unlink()
+
+
+def _workflow_has_payload(entry: Optional[Dict[str, Any]]) -> bool:
+    return bool(
+        isinstance(entry, dict)
+        and entry.get("success")
+        and isinstance(entry.get("payload"), dict)
+    )
+
+
+def _format_file_line(
+    filename: str,
+    has_isbn: bool,
+    has_metadata: bool,
+    processed: bool,
+    process_origin: str,
+) -> str:
+    def _label(value: bool) -> str:
+        return "oui" if value else "non"
+
+    origin = process_origin or "inconnu"
+    return (
+        f"{filename} | isbn={_label(has_isbn)} | metadata={_label(has_metadata)} | "
+        f"traité={_label(processed)} | par={origin}"
+    )
+
+
+def _has_any_metadata(result: Dict[str, Any]) -> bool:
+    if _workflow_has_payload(result.get("json_n8n_isbn")):
+        return True
+    if _workflow_has_payload(result.get("json_n8n_metadata")):
+        return True
+    extract_metadata = result.get("json_extract_metadata")
+    metadata = extract_metadata.get("metadata") if isinstance(extract_metadata, dict) else None
+    return bool(metadata)
 
 @click.group()
 def cli():
@@ -98,6 +141,8 @@ def run_command(
     n8n_test: bool,
 ):
     """Exécute le pipeline de traitement des fichiers EPUB."""
+    if reset:
+        _purge_logs()
     setup_logging(verbose)
     
     if dry_run:
@@ -133,38 +178,28 @@ async def main_process(
     redis_manager = RedisStateManager(settings)
 
     try:
+        if use_redis_state:
+            await redis_manager.connect()
+
         # --- NEW RESET LOGIC ---
         if reset:
             logger.warning("Mode --reset activé : troncature de la base de données et réinitialisation de Redis.")
-            if not dry_run:
-                await db.truncate_db(settings)
-                if use_redis_state:
-                    await redis_manager.connect() # Ensure redis is connected before resetting
-                    await redis_manager.reset_state()
-                logs_dir = PROJECT_ROOT / "logs"
-                if logs_dir.exists():
-                    for log_file in logs_dir.glob("*"):
-                        if log_file.is_file():
-                            log_file.unlink()
-            else:
-                logger.info("En mode --dry-run, la base de données ne sera pas tronquée et Redis ne sera pas réinitialisé.")
+            await db.truncate_db(settings)
+            if use_redis_state:
+                await redis_manager.reset_state()
         # --- END NEW RESET LOGIC ---
-        
-        if not dry_run:
-            pool = await db.create_pool(settings)
-            if not pool:
-                logger.error("Échec de la création du pool de connexions DB. Arrêt.")
-                return
 
-        if use_redis_state and not dry_run:
-            await redis_manager.connect()
+        pool = await db.create_pool(settings)
+        if not pool:
+            logger.error("Échec de la création du pool de connexions DB. Arrêt.")
+            return
 
         if test_file_path:
             files_to_process = [test_file_path]
         else:
             all_files = sorted([p for p in settings.epub_dir.glob("**/*.epub") if p.is_file()])
             
-            if use_redis_state and not dry_run:
+            if use_redis_state:
                 all_files = await redis_manager.filter_processed_files(all_files)
             
             # Appliquer offset et limit
@@ -178,50 +213,76 @@ async def main_process(
 
         logger.info(f"{len(files_to_process)} fichier(s) à traiter.")
 
+        results = []
         async with httpx.AsyncClient(timeout=settings.request_timeout, verify=settings.n8n_verify_ssl) as http_client:
-            tasks = []
             for file_path in files_to_process:
-                task = pipeline.run_pipeline(
-                    file_path,
-                    pool,
-                    settings,
-                    dry_run=dry_run,
-                    test_mode=test_file_path is not None,
-                    use_n8n_test=use_n8n_test,
-                    http_client=http_client,
-                )
-                tasks.append(task)
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    result = await pipeline.run_pipeline(
+                        file_path,
+                        pool,
+                        settings,
+                        dry_run=dry_run,
+                        test_mode=test_file_path is not None,
+                        use_n8n_test=use_n8n_test,
+                        http_client=http_client,
+                    )
+                    results.append(result)
+                except Exception as exc:  # Fallback en cas d'erreur inattendue
+                    results.append(exc)
 
-        processed_count, failed_count, dup_hash, dup_isbn = 0, 0, 0, 0
-        for i, result in enumerate(results):
+        printed_any = False
+        for idx, result in enumerate(results):
+            file_path = files_to_process[idx]
+            file_name = file_path.name
+
+            def _maybe_separator():
+                nonlocal printed_any
+                if printed_any:
+                    logger.info("----", extra={"plain": True})
+                else:
+                    printed_any = True
+
             if isinstance(result, Exception):
-                failed_count += 1
-                logger.error(f"Erreur non gérée pour {files_to_process[i]}: {result}")
-            elif isinstance(result, dict):
-                status = result.get("status")
-                if status == "processed":
-                    processed_count += 1
-                elif status == "failed":
-                    failed_count += 1
-                elif status == "duplicate_hash":
-                    dup_hash +=1
-                elif status == "duplicate_isbn":
-                    dup_isbn +=1
-                
-                # Marquer comme traité dans Redis
-                if use_redis_state and not dry_run and status in ["processed", "failed", "duplicate_isbn"]:
-                    await redis_manager.add_processed_file(files_to_process[i])
+                logger.error(f"Erreur non gérée pour {file_path}: {result}")
+                _maybe_separator()
+                logger.info(
+                    _format_file_line(file_name, False, False, False, "exception"),
+                    extra={"plain": True},
+                )
+                printed_any = True
+                continue
 
+            if not isinstance(result, dict):
+                _maybe_separator()
+                logger.info(
+                    _format_file_line(file_name, False, False, False, "inconnu"),
+                    extra={"plain": True},
+                )
+                printed_any = True
+                continue
 
-        logger.info("--- Résumé du traitement ---")
-        logger.info(f"  Fichiers traités avec succès : {processed_count}")
-        logger.info(f"  Fichiers en échec           : {failed_count}")
-        logger.info(f"  Doublons de hash            : {dup_hash}")
-        logger.info(f"  Doublons d'ISBN             : {dup_isbn}")
-        logger.info(f"  Total                       : {len(files_to_process)}")
-        logger.info("-----------------------------")
+            status = result.get("status") or "unknown"
+
+            if use_redis_state and status in ["processed", "failed", "duplicate_isbn"]:
+                await redis_manager.add_processed_file(file_path)
+
+            has_isbn = bool(result.get("isbn"))
+            has_metadata = _has_any_metadata(result)
+            processed_flag = status == "processed"
+            process_origin = (result.get("choice_source") or "unknown") if processed_flag else status
+
+            _maybe_separator()
+            logger.info(
+                _format_file_line(
+                    file_name,
+                    has_isbn,
+                    has_metadata,
+                    processed_flag,
+                    process_origin or "inconnu",
+                ),
+                extra={"plain": True},
+            )
+            printed_any = True
 
 
     finally:

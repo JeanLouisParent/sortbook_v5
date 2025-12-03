@@ -32,8 +32,14 @@ C'est le cœur du système. Un script en ligne de commande (`src/main.py`) orche
     3.  Extraction des métadonnées locales (titre, auteur, ISBN...).
     4.  Appel à des services externes (workflows N8N) pour enrichir les données via l'ISBN ou les métadonnées.
     5.  (Optionnel) Appel à des services d'IA (Flowise) pour des analyses plus complexes (validation, analyse de couverture).
-    6.  Prise de décision pour choisir le titre et l'auteur finaux.
+    6.  Prise de décision pour choisir le titre et l'auteur finaux uniquement à partir des workflows (`n8n_isbn`, `n8n_metadata`, Flowise…). Les métadonnées locales ne sont jamais utilisées comme fallback.
     7.  Mise à jour de l'entrée du livre en base de données avec le statut final (`processed`, `failed`, `duplicate_isbn`).
+
+-   **Exécution** :
+    -   Les EPUB sont traités séquentiellement afin de simplifier le suivi et la reprise.
+    -   L'option `--dry-run` exécute toutes les étapes (écriture en base, mise à jour Redis, appels externes) et n'évite que les déplacements de fichiers.
+    -   `--reset` réinitialise toujours le schéma PostgreSQL et l'état Redis, puis purge le dossier `logs/` avant d'initialiser le logging.
+    -   La console affiche une seule ligne par fichier, tandis que `logs/processing.log` conserve l'intégralité des détails (requêtes HTTP, erreurs, etc.).
 
 ### 2. n8n (Service d'automatisation)
 

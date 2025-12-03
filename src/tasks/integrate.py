@@ -26,25 +26,26 @@ def _build_error_response(source: str, message: str, raw: Optional[Any] = None) 
 def _validate_workflow_response(result: Any, expected_source: str) -> Dict[str, Any]:
     if not isinstance(result, dict):
         raise ValueError("Workflow response must be a JSON object")
-    for key in ("success", "source", "payload"):
-        if key not in result:
-            raise ValueError(f"Workflow response missing '{key}' field")
+    if "success" not in result or "source" not in result:
+        raise ValueError("Workflow response must include 'success' and 'source'")
     success = result["success"]
     source = result["source"]
-    payload = result["payload"]
     if not isinstance(success, bool):
         raise ValueError("'success' must be a boolean")
     if not isinstance(source, str):
         raise ValueError("'source' must be a string")
     if source != expected_source:
         raise ValueError(f"Unexpected 'source' value: expected '{expected_source}', got '{source}'")
-    if not isinstance(payload, dict):
-        raise ValueError("'payload' must be an object")
+    payload = result.get("payload")
     if success:
+        if not isinstance(payload, dict):
+            raise ValueError("Successful workflow response must include a 'payload' object")
         title = payload.get("title")
         author = payload.get("author")
         if not title or not author:
             raise ValueError("Successful workflow response must include 'payload.title' and 'payload.author'")
+    elif payload is not None and not isinstance(payload, dict):
+        raise ValueError("'payload' must be an object when provided")
     errors = result.get("errors")
     if errors is None:
         result["errors"] = []

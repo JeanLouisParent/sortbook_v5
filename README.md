@@ -97,6 +97,15 @@ python src/main.py run --use-redis
 
 Les options de cette commande utilisent désormais les valeurs définies dans `config/config.yaml` (section `commands.run`) comme comportements par défaut. Modifier ce fichier vous permet d'ajuster, par exemple, l'activation de Redis ou la limite de fichiers sans avoir à répéter les options en ligne de commande. Toute option passée à `python src/main.py run` continue de surcharger ces valeurs par défaut.
 
+### Comportement d'exécution
+
+-   **Sortie console compacte** : chaque fichier traité produit une seule ligne `nom | isbn=oui/non | metadata=oui/non | traité=oui/non | par=source`. Une ligne `----` sépare les fichiers successifs et aucun résumé final n'est affiché.
+-   **Journalisation persistée** : `logs/processing.log` est recréé à chaque exécution. Lorsqu'on lance `run --reset`, le fichier est purgé avant l'initialisation du logging, puis rempli avec l'intégralité de la nouvelle session.
+-   **`--reset` agressif** : le schéma PostgreSQL et l'état Redis sont tronqués même en `--dry-run`, afin de repartir systématiquement sur une base propre.
+-   **`--dry-run` complet** : le mode sec exécute toutes les étapes (écriture en base, mise à jour Redis, appels n8n/Flowise) et ne saute que les déplacements de fichiers. C'est le mode conseillé pour tester le pipeline tout en vérifiant le résultat stocké dans `book_data.books`.
+-   **Traitement séquentiel** : aucun worker ni parallélisme n'est utilisé ; les EPUB sont traités un par un pour faciliter le suivi.
+-   **Décision 100 % workflows** : le titre/auteur final n'est retenu que si un workflow externe (`n8n_isbn`, `n8n_metadata`, Flowise…) renvoie `success=true` avec `payload.title` et `payload.author`. Les extractions locales servent uniquement d'entrées pour ces workflows.
+
 ## Développement
 
 ### Structure du projet

@@ -1,6 +1,7 @@
 """
 Opérations et pool de connexions pour la base de données PostgreSQL avec asyncpg.
 """
+import json
 import logging
 from typing import Optional, Dict, Any, List
 from uuid import UUID
@@ -12,6 +13,27 @@ from src.config import Settings
 
 logger = logging.getLogger(__name__)
 DB_SCHEMA = "book_data"
+BOOK_UPDATE_COLUMNS = {
+    "isbn",
+    "isbn_source",
+    "has_cover",
+    "text_preview",
+    "epub_metadata",
+    "choice_source",
+    "final_author",
+    "final_title",
+    "status",
+    "processing_completed_at",
+    "processing_time_ms",
+    "error_message",
+    "json_extract_isbn",
+    "json_extract_text",
+    "json_extract_cover",
+    "json_n8n_isbn",
+    "json_n8n_metadata",
+    "json_flowise_cover",
+    "json_flowise_check",
+}
 
 async def create_pool(settings: Settings) -> Optional[Pool]:
     """Crée un pool de connexions PostgreSQL."""
@@ -76,7 +98,13 @@ async def find_book_by_isbn(pool: Pool, isbn: str) -> Optional[Dict[str, Any]]:
         )
         return dict(row) if row else None
 
-async def create_book_entry(pool: Pool, data: Dict[str, Any]) -> UUID:
+async def create_book_entry(
+    pool: Pool,
+    file_hash: str,
+    filename: str,
+    file_path: str,
+    file_size: int,
+) -> UUID:
     """Crée une nouvelle entrée pour un livre avec le statut 'pending'."""
     async with pool.acquire() as conn:
         book_id = await conn.fetchval(
@@ -85,10 +113,10 @@ async def create_book_entry(pool: Pool, data: Dict[str, Any]) -> UUID:
             VALUES ($1, $2, $3, $4, 'pending', NOW())
             RETURNING id
             """,
-            data["file_hash"],
-            data["filename"],
-            str(data["file_path"]),
-            data["file_size"],
+            file_hash,
+            filename,
+            file_path,
+            file_size,
         )
         return book_id
 
@@ -97,9 +125,18 @@ async def update_book_entry(pool: Pool, book_id: UUID, data: Dict[str, Any]):
     # Construit la requête de mise à jour dynamiquement
     set_clauses = []
     values = []
-    for i, (key, value) in enumerate(data.items()):
-        set_clauses.append(f"{key} = ${i + 2}")
-        values.append(value)
+    for key, value in data.items():
+        if key not in BOOK_UPDATE_COLUMNS:
+            continue
+        placeholder = len(values) + 2
+        set_clauses.append(f"{key} = ${placeholder}")
+        if isinstance(value, (dict, list)):
+            values.append(json.dumps(value))
+        else:
+            values.append(value)
+
+    if not set_clauses:
+        return
     
     query = f"UPDATE {DB_SCHEMA}.books SET {', '.join(set_clauses)} WHERE id = $1"
     

@@ -36,13 +36,19 @@ def setup_logging(verbose: bool = False):
         ],
     )
 
+    class ConsoleFormatter(logging.Formatter):
+        def format(self, record):
+            if getattr(record, "plain", False):
+                return record.getMessage()
+            return super().format(record)
+
     # Créer un handler pour la console et le configurer
     console_handler = logging.StreamHandler(sys.stdout)
     console_log_level = logging.DEBUG if verbose else logging.INFO
     console_handler.setLevel(console_log_level)
 
     # Appliquer un formateur différent pour la console pour plus de lisibilité
-    console_formatter = logging.Formatter("%(levelname)s: %(message)s")
+    console_formatter = ConsoleFormatter("%(levelname)s: %(message)s")
     console_handler.setFormatter(console_formatter)
 
     # Ajouter le handler console au logger racine
@@ -52,3 +58,5 @@ def setup_logging(verbose: bool = False):
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("ebooklib").setLevel(logging.WARNING)
     logging.getLogger("PIL").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

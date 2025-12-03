@@ -58,6 +58,20 @@ def extract_cover(file_path: Path) -> Dict[str, Any]:
             return {"has_cover": False, "cover_content": None}
 
         image_bytes = cover_item.get_content()
+        cover_filename = None
+        cover_media_type = None
+
+        get_name = getattr(cover_item, "get_name", None)
+        if callable(get_name):
+            cover_filename = get_name()
+        else:
+            cover_filename = getattr(cover_item, "file_name", None)
+
+        get_media_type = getattr(cover_item, "get_media_type", None)
+        if callable(get_media_type):
+            cover_media_type = get_media_type()
+        else:
+            cover_media_type = getattr(cover_item, "media_type", None)
         
         try:
             with Image.open(io.BytesIO(image_bytes)) as img:
@@ -69,8 +83,8 @@ def extract_cover(file_path: Path) -> Dict[str, Any]:
 
         return {
             "has_cover": True,
-            "cover_filename": cover_item.get_name(),
-            "cover_media_type": cover_item.get_media_type(),
+            "cover_filename": cover_filename,
+            "cover_media_type": cover_media_type,
             "cover_content": image_bytes,
             "width": width,
             "height": height,
