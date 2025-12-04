@@ -18,11 +18,9 @@ CREATE TABLE IF NOT EXISTS book_data.books (
     file_size BIGINT,
 
     -- Données extraites localement
-    epub_metadata JSONB,
     isbn TEXT,
     isbn_source TEXT, -- 'metadata' | 'content' | 'none'
     has_cover BOOLEAN DEFAULT FALSE,
-    text_preview TEXT,
 
     -- Décision finale
     choice_source TEXT, -- 'isbn' | 'metadata' | 'text' | 'cover' | 'unknown'
@@ -39,12 +37,8 @@ CREATE TABLE IF NOT EXISTS book_data.books (
     -- Données JSON brutes de chaque étape du pipeline
     json_extract_isbn JSONB,
     json_extract_metadata JSONB,
-    json_extract_text JSONB,
     json_extract_cover JSONB,
-    json_n8n_isbn JSONB,
-    json_n8n_metadata JSONB,
-    json_flowise_cover JSONB,
-    json_flowise_check JSONB
+    json_n8n_response JSONB
 );
 
 -- Index pour accélérer les recherches courantes

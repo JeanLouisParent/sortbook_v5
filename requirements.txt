@@ -8,3 +8,6 @@ ebooklib
 beautifulsoup4
 Pillow
 pyyaml
+easyocr
+numpy
+torch

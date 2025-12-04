@@ -13,15 +13,21 @@ Il est architecturé autour d'une application Python principale et de services c
 
 ## Architecture
 
-L'architecture est conçue pour être modulaire et extensible.
+Le pipeline repose sur une séparation nette des responsabilités :
 
--   **Application Python (`src/`)**: Un outil en ligne de commande qui orchestre le traitement de chaque livre. Il extrait les métadonnées, appelle des services externes pour les enrichir, et stocke le résultat dans une base de données PostgreSQL.
--   **n8n**: Un service d'automatisation de workflows, utilisé ici pour créer des micro-services d'enrichissement de données (ex: recherche d'informations sur un livre à partir de son ISBN).
--   **PostgreSQL**: La base de données qui stocke l'état et les métadonnées de tous les livres traités.
--   **Traefik**: Le reverse proxy qui expose le service n8n de manière sécurisée.
--   **Redis**: Un gestionnaire d'état optionnel pour assurer la reprise du traitement sans traiter deux fois le même fichier.
+- **Application Python (`src/`)** : extrait les métadonnées locales (hash, EPUB metadata, texte, couverture, ISBN) et construit un payload JSON complet.
+- **n8n (`sortebook_v5`)** : reçoit ce payload, orchestre les appels complémentaires (Flowise, APIs externes, règles métier) et renvoie `success=true` avec le titre/auteur choisis.
+- **PostgreSQL** : stocke les métadonnées locales, la réponse n8n (`json_n8n_response`) et le statut final (`processed`, `duplicate_hash`, `failed`, etc.).
+- **Symphonique Redis** : optionnelle, elle assure la reprise via `book_processor:processed_files`.
+- **Traefik** : expose n8n/Flowise (via tes règles locales) pour que les webhooks soient joignables.
 
-Pour une description plus détaillée, consultez le document d'[architecture](./doc/architecture.md).
+### OCR & images
+
+- Le payload vers `sortebook_v5` comporte désormais `cover.primary`, une liste `cover.images` sans base64 (les SVG sont filtrés) et `image_ocr` contenant les textes EasyOCR extraits des images de couverture validées.  
+- Les réglages OCR (langues, contraintes de contraste, seuils de texte, GPU, etc.) vivnent dans `config/config.yaml` (`ocr`), sont exposés via `src/config.py` et pilotent `src/tasks/ocr.py` qui lance `reader.readtext` avec les paramètres détaillés (`detail`, `paragraph`, `contrast_ths`, `text_threshold`, …).  
+- Si EasyOCR/numpy ne sont pas installés, on logge une seule fois le warning, et les champs OCR restent vides ; tu peux activer le GPU en mettant `ocr.use_gpu: true` et en installant un PyTorch CUDA compatible (`pip install torch torchvision --index-url ...`).  
+
+L'application Python n'appelle plus directement Flowise ni plusieurs workflows : elle délègue toute la logique d'enrichissement à n8n. Pour le détail du payload JSON et du format attendu par `sortebook_v5`, consultez [doc/architecture.md](./doc/architecture.md).
 
 ## Installation
 
@@ -49,8 +55,7 @@ Pour une description plus détaillée, consultez le document d'[architecture](./
     cp src/.env.example src/.env
     # Éditez src/.env avec vos informations
     ```
-    > Astuce : si vos webhooks N8N sont servis avec un certificat auto-signé via Traefik, définissez `services.n8n.verify_ssl: false` dans `config/config.yaml` (ou `N8N_VERIFY_SSL=false` dans `src/.env`) pour autoriser les appels HTTPS.
-    > Les workflows N8N/Flowise doivent renvoyer un JSON normalisé (`success`, `source`, `payload`, etc.). Le format complet et la stratégie d'appel (ISBN d'abord, metadata en secours) sont décrits dans [doc/architecture.md](doc/architecture.md).
+    > Astuce : si vos webhooks N8N sont servis avec un certificat auto-signé via Traefik, définissez `services.n8n.verify_ssl: false` dans `config/config.yaml` (ou `N8N_VERIFY_SSL=false` dans `src/.env`). Le workflow `sortebook_v5` doit renvoyer un JSON normalisé (`success`, `source`, `payload.title`, `payload.author`, etc.) décrit dans [doc/architecture.md](doc/architecture.md).
 
 3.  **Configuration de n8n**
 
@@ -102,9 +107,9 @@ Les options de cette commande utilisent désormais les valeurs définies dans `c
 -   **Sortie console compacte** : chaque fichier traité produit une seule ligne `nom | isbn=oui/non | metadata=oui/non | traité=oui/non | par=source`. Une ligne `----` sépare les fichiers successifs et aucun résumé final n'est affiché.
 -   **Journalisation persistée** : `logs/processing.log` est recréé à chaque exécution. Lorsqu'on lance `run --reset`, le fichier est purgé avant l'initialisation du logging, puis rempli avec l'intégralité de la nouvelle session.
 -   **`--reset` agressif** : le schéma PostgreSQL et l'état Redis sont tronqués même en `--dry-run`, afin de repartir systématiquement sur une base propre.
--   **`--dry-run` complet** : le mode sec exécute toutes les étapes (écriture en base, mise à jour Redis, appels n8n/Flowise) et ne saute que les déplacements de fichiers. C'est le mode conseillé pour tester le pipeline tout en vérifiant le résultat stocké dans `book_data.books`.
+-   **`--dry-run` complet** : le mode sec exécute toutes les étapes (écriture en base, mise à jour Redis, appel vers `sortebook_v5`) et ne saute que les déplacements de fichiers. C'est le mode conseillé pour tester le pipeline tout en vérifiant le résultat stocké dans `book_data.books`.
 -   **Traitement séquentiel** : aucun worker ni parallélisme n'est utilisé ; les EPUB sont traités un par un pour faciliter le suivi.
--   **Décision 100 % workflows** : le titre/auteur final n'est retenu que si un workflow externe (`n8n_isbn`, `n8n_metadata`, Flowise…) renvoie `success=true` avec `payload.title` et `payload.author`. Les extractions locales servent uniquement d'entrées pour ces workflows.
+-   **Décision 100 % workflows** : le titre/auteur final n'est retenu que si le workflow `sortebook_v5` renvoie `success=true` avec `payload.title` et `payload.author`. Les extractions locales servent uniquement d'entrées pour ce workflow.
 
 ## Développement
 

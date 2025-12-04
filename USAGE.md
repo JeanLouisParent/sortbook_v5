@@ -20,7 +20,7 @@ Ce projet fournit les outils pour traiter une bibliothèque de livres numérique
 2.  **Configurez les services**
 
     -   **n8n** : Copiez `n8n/.env.example` vers `n8n/.env` et remplissez les variables.
-    -   **book_processor** : Copiez `src/.env.example` vers `src/.env` et configurez les accès à la base de données, Redis, et les URLs des services externes (N8N, Flowise).
+    -   **book_processor** : Copiez `src/.env.example` vers `src/.env` et configurez les accès à la base de données, Redis, et l'URL du webhook `sortebook_v5` dans `config/config.yaml`. (Flowise reste disponible côté n8n.)
 
 3.  **Installez les dépendances Python**
 

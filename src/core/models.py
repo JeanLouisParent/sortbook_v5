@@ -2,7 +2,7 @@
 Pydantic models for data structures used in the pipeline.
 """
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 class BaseWorkflowPayload(BaseModel):
     """Base model for a workflow payload, requiring title and author."""
@@ -11,13 +11,13 @@ class BaseWorkflowPayload(BaseModel):
 
 class WorkflowResponse(BaseModel):
     """
-    Represents the standardized response from an external workflow (N8N, Flowise).
+    Represents the standardized response from the SortBook n8n workflow.
     """
     success: bool
     source: str
     payload: Optional[BaseWorkflowPayload] = None
     errors: List[str] = []
-    raw: Optional[Dict[str, Any]] = None
+    raw: Optional[Any] = None
 
 class ExtractedMetadata(BaseModel):
     """EPUB metadata extracted by ebooklib."""

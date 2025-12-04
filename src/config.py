@@ -7,7 +7,7 @@ Ce module utilise Pydantic pour lire les variables d'environnement
 import os
 import yaml
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, HttpUrl, PostgresDsn
@@ -26,7 +26,6 @@ class AppConfig(BaseModel):
 class PathsConfig(BaseModel):
     book_sources: Path
     book_target: Path
-    epub_directory: Path
 
 class DatabaseConfig(BaseModel):
     dsn: PostgresDsn
@@ -39,18 +38,23 @@ class RedisConfig(BaseModel):
 class N8NServiceConfig(BaseModel):
     prod_url: HttpUrl
     test_url: HttpUrl
-    isbn_path: str
-    metadata_path: str
+    workflow_path: str
     verify_ssl: bool = True
 
-class FlowiseServiceConfig(BaseModel):
-    base_url: HttpUrl
-    check_flow_id: str
-    cover_flow_id: str
+class OCRConfig(BaseModel):
+    languages: List[str] = ["fr", "en"]
+    use_gpu: bool = False
+    max_chars: int = 2000
+    detail: int = 0
+    paragraph: bool = True
+    contrast_ths: float = 0.1
+    adjust_contrast: float = 0.5
+    text_threshold: float = 0.5
+    low_text: float = 0.4
+    link_threshold: float = 0.4
 
 class ServicesConfig(BaseModel):
     n8n: N8NServiceConfig
-    flowise: FlowiseServiceConfig
 
 class RunCommandConfig(BaseModel):
     dry_run: bool = False
@@ -71,6 +75,7 @@ class Settings(BaseModel):
     database: DatabaseConfig
     redis: RedisConfig
     services: ServicesConfig
+    ocr: OCRConfig
     commands: CommandsConfig = Field(default_factory=CommandsConfig)
     model_config = {"arbitrary_types_allowed": True}
 
@@ -103,7 +108,7 @@ class Settings(BaseModel):
 
         # Paths
         if os.getenv("EPUB_DIR"):
-            config_data.setdefault("paths", {})["epub_directory"] = os.getenv("EPUB_DIR")
+            config_data.setdefault("paths", {})["book_sources"] = os.getenv("EPUB_DIR")
         if os.getenv("BOOK_SOURCES"):
             config_data.setdefault("paths", {})["book_sources"] = os.getenv("BOOK_SOURCES")
         if os.getenv("BOOK_TARGET"):
@@ -124,21 +129,35 @@ class Settings(BaseModel):
             config_data.setdefault("services", {}).setdefault("n8n", {})["prod_url"] = os.getenv("N8N_PROD_URL")
         if os.getenv("N8N_TEST_URL"):
             config_data.setdefault("services", {}).setdefault("n8n", {})["test_url"] = os.getenv("N8N_TEST_URL")
-        if os.getenv("N8N_ISBN_PATH"):
-            config_data.setdefault("services", {}).setdefault("n8n", {})["isbn_path"] = os.getenv("N8N_ISBN_PATH")
-        if os.getenv("N8N_METADATA_PATH"):
-            config_data.setdefault("services", {}).setdefault("n8n", {})["metadata_path"] = os.getenv("N8N_METADATA_PATH")
         if os.getenv("N8N_VERIFY_SSL"):
             config_data.setdefault("services", {}).setdefault("n8n", {})["verify_ssl"] = os.getenv("N8N_VERIFY_SSL").lower() in ("1", "true", "yes")
 
-        # Flowise Services
-        if os.getenv("FLOWISE_BASE_URL"):
-            config_data.setdefault("services", {}).setdefault("flowise", {})["base_url"] = os.getenv("FLOWISE_BASE_URL")
-        if os.getenv("FLOWISE_CHECK_ID"):
-            config_data.setdefault("services", {}).setdefault("flowise", {})["check_flow_id"] = os.getenv("FLOWISE_CHECK_ID")
-        if os.getenv("FLOWISE_COVER_ID"):
-            config_data.setdefault("services", {}).setdefault("flowise", {})["cover_flow_id"] = os.getenv("FLOWISE_COVER_ID")
+        if os.getenv("N8N_WORKFLOW_PATH"):
+            config_data.setdefault("services", {}).setdefault("n8n", {})["workflow_path"] = os.getenv("N8N_WORKFLOW_PATH")
 
+        config_data.setdefault("ocr", {})
+        if os.getenv("OCR_LANGUAGES"):
+            langs = [lang.strip() for lang in os.getenv("OCR_LANGUAGES").split(",") if lang.strip()]
+            if langs:
+                config_data.setdefault("ocr", {})["languages"] = langs
+        if os.getenv("OCR_USE_GPU"):
+            config_data.setdefault("ocr", {})["use_gpu"] = os.getenv("OCR_USE_GPU").lower() in ("1", "true", "yes")
+        if os.getenv("OCR_MAX_CHARS"):
+            config_data.setdefault("ocr", {})["max_chars"] = int(os.getenv("OCR_MAX_CHARS"))
+        if os.getenv("OCR_DETAIL"):
+            config_data.setdefault("ocr", {})["detail"] = int(os.getenv("OCR_DETAIL"))
+        if os.getenv("OCR_PARAGRAPH"):
+            config_data.setdefault("ocr", {})["paragraph"] = os.getenv("OCR_PARAGRAPH").lower() in ("1", "true", "yes")
+        if os.getenv("OCR_CONTRAST_THS"):
+            config_data.setdefault("ocr", {})["contrast_ths"] = float(os.getenv("OCR_CONTRAST_THS"))
+        if os.getenv("OCR_ADJUST_CONTRAST"):
+            config_data.setdefault("ocr", {})["adjust_contrast"] = float(os.getenv("OCR_ADJUST_CONTRAST"))
+        if os.getenv("OCR_TEXT_THRESHOLD"):
+            config_data.setdefault("ocr", {})["text_threshold"] = float(os.getenv("OCR_TEXT_THRESHOLD"))
+        if os.getenv("OCR_LOW_TEXT"):
+            config_data.setdefault("ocr", {})["low_text"] = float(os.getenv("OCR_LOW_TEXT"))
+        if os.getenv("OCR_LINK_THRESHOLD"):
+            config_data.setdefault("ocr", {})["link_threshold"] = float(os.getenv("OCR_LINK_THRESHOLD"))
 
         return cls(**config_data)
 
@@ -157,7 +176,7 @@ class Settings(BaseModel):
 
     @property
     def epub_dir(self) -> Path:
-        return Path(self.paths.epub_directory).expanduser()
+        return Path(self.paths.book_sources).expanduser()
 
     @property
     def postgres_dsn(self) -> PostgresDsn:
@@ -180,52 +199,71 @@ class Settings(BaseModel):
         return str(self.services.n8n.prod_url)
 
     @property
-    def n8n_isbn_path(self) -> str:
-        return self.services.n8n.isbn_path
-
-    @property
-    def n8n_metadata_path(self) -> str:
-        return self.services.n8n.metadata_path
-
-    @property
     def n8n_verify_ssl(self) -> bool:
         return self.services.n8n.verify_ssl
+
+    @property
+    def n8n_workflow_path(self) -> str:
+        return self.services.n8n.workflow_path
 
     @property
     def n8n_test_base_url(self) -> str:
         return str(self.services.n8n.test_url)
 
     @property
-    def n8n_test_isbn_path(self) -> str:
-        return self.n8n_isbn_path
+    def n8n_test_workflow_path(self) -> str:
+        return self.services.n8n.workflow_path
+
+    def _combine_n8n_url(self, base: str, path: str) -> str:
+        return f"{base.rstrip('/')}/{path.lstrip('/')}"
 
     @property
-    def n8n_test_metadata_path(self) -> str:
-        return self.n8n_metadata_path
+    def n8n_workflow_url(self) -> str:
+        return self._combine_n8n_url(self.n8n_base_url, self.n8n_workflow_path)
 
     @property
-    def flowise_base_url(self) -> str:
-        return str(self.services.flowise.base_url)
+    def n8n_test_workflow_url(self) -> str:
+        return self._combine_n8n_url(self.n8n_test_base_url, self.n8n_test_workflow_path)
 
     @property
-    def flowise_check_id(self) -> str:
-        return self.services.flowise.check_flow_id
+    def ocr_languages(self) -> List[str]:
+        return list(self.ocr.languages)
 
     @property
-    def flowise_cover_id(self) -> str:
-        return self.services.flowise.cover_flow_id
+    def ocr_use_gpu(self) -> bool:
+        return self.ocr.use_gpu
 
     @property
-    def flowise_test_base_url(self) -> str:
-        return self.flowise_base_url
+    def ocr_max_chars(self) -> int:
+        return self.ocr.max_chars
 
     @property
-    def flowise_test_check_id(self) -> str:
-        return self.flowise_check_id
+    def ocr_detail(self) -> int:
+        return self.ocr.detail
 
     @property
-    def flowise_test_cover_id(self) -> str:
-        return self.flowise_cover_id
+    def ocr_paragraph(self) -> bool:
+        return self.ocr.paragraph
+
+    @property
+    def ocr_contrast_ths(self) -> float:
+        return self.ocr.contrast_ths
+
+    @property
+    def ocr_adjust_contrast(self) -> float:
+        return self.ocr.adjust_contrast
+
+    @property
+    def ocr_text_threshold(self) -> float:
+        return self.ocr.text_threshold
+
+    @property
+    def ocr_low_text(self) -> float:
+        return self.ocr.low_text
+
+    @property
+    def ocr_link_threshold(self) -> float:
+        return self.ocr.link_threshold
 
 # Instance globale des réglages
 try:

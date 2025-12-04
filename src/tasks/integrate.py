@@ -1,139 +1,105 @@
 """
-HTTP clients for calling external enrichment workflows (N8N, Flowise).
+HTTP client for the single SortBook n8n workflow.
 """
+from typing import Any, Dict, Optional, Tuple
 import logging
-from typing import Dict, Any, Optional, List
 
 import httpx
-from pydantic import ValidationError
 
 from src.config import Settings
-from src.core.models import WorkflowResponse
 
 logger = logging.getLogger(__name__)
 
 
 def _build_error_response(source: str, message: str, raw: Optional[Any] = None) -> Dict[str, Any]:
     response: Dict[str, Any] = {
-        "success": False, "source": source, "payload": {}, "errors": [message]
+        "success": False,
+        "source": source,
+        "payload": None,
+        "errors": [message],
     }
     if raw is not None:
         response["raw"] = raw
     return response
 
 
-def _validate_workflow_response(result: Dict[str, Any], expected_source: str) -> Dict[str, Any]:
-    """Parses and validates the workflow response using Pydantic models."""
-    response_model = WorkflowResponse.model_validate(result)
-    if response_model.source != expected_source:
-        raise ValueError(f"Unexpected 'source': expected '{expected_source}', got '{response_model.source}'")
-    return response_model.model_dump()
+def _validate_workflow_response(result: Any, expected_source: Optional[str] = None) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        raise ValueError("Workflow response must be a JSON object")
+    if "success" not in result or "source" not in result:
+        raise ValueError("Workflow response must include 'success' and 'source'")
+    success = result["success"]
+    source = result["source"]
+    if not isinstance(success, bool):
+        raise ValueError("'success' must be a boolean")
+    if not isinstance(source, str):
+        raise ValueError("'source' must be a string")
+    if expected_source and source != expected_source:
+        raise ValueError(f"Unexpected 'source' value: expected '{expected_source}', got '{source}'")
+    payload = result.get("payload")
+    if success:
+        if not isinstance(payload, dict):
+            raise ValueError("Successful workflow response must include a 'payload' object")
+        title = payload.get("title")
+        author = payload.get("author")
+        if not title or not author:
+            raise ValueError("Successful workflow response must include 'payload.title' and 'payload.author'")
+    elif payload is not None and not isinstance(payload, dict):
+        raise ValueError("'payload' must be an object when provided")
+    errors = result.get("errors")
+    if errors is None:
+        result["errors"] = []
+    elif not isinstance(errors, list):
+        raise ValueError("'errors' must be an array when provided")
+    return result
 
 
-async def _call_workflow(
-    http_client: httpx.AsyncClient,
-    url: str,
+def _ensure_dict_response(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, list) and raw:
+        first = raw[0]
+        if isinstance(first, dict):
+            return first
+    raise ValueError("Workflow response must be a JSON object")
+
+
+async def call_n8n_sortebook_workflow(
     payload: Dict[str, Any],
-    source: str,
-    files: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Generic function to call a workflow, handle errors, and validate response."""
-    logger.debug(f"Calling {source} workflow at {url}")
-    raw_result = None
+    settings: Settings,
+    test_mode: bool = False,
+    http_client: Optional[httpx.AsyncClient] = None,
+) -> Tuple[Dict[str, Any], Any]:
+    """
+    Calls the n8n workflow that finalizes the SortBook pipeline.
+    """
+    url = settings.n8n_test_workflow_url if test_mode else settings.n8n_workflow_url
+
+    logger.debug("Calling SortBook n8n workflow: %s", url)
+
     try:
-        response = await http_client.post(url, json=payload if not files else None, data=payload if files else None, files=files)
+        client = http_client or httpx.AsyncClient(
+            timeout=settings.request_timeout, verify=settings.n8n_verify_ssl
+        )
+        response = await client.post(url, json=payload)
         response.raise_for_status()
         raw_result = response.json()
-        return _validate_workflow_response(raw_result, source)
-    except (ValidationError, ValueError) as e:
-        logger.error(f"Invalid response from {source}: {e}")
-        return _build_error_response(source, str(e), raw_result)
+        normalized = _ensure_dict_response(raw_result)
+        parsed = _validate_workflow_response(normalized)
+        logger.debug("SortBook workflow response: %s", parsed)
+        return parsed, raw_result
+
+    except ValueError as e:
+        logger.error("Invalid response from SortBook workflow: %s", e)
+        return _build_error_response("sortebook_v5", str(e), raw_result if 'raw_result' in locals() else None), raw_result if 'raw_result' in locals() else None
     except httpx.HTTPStatusError as e:
-        msg = f"HTTP Error {e.response.status_code}: {e.response.text}"
-        logger.error(f"Error calling {source}: {msg}")
-        return _build_error_response(source, msg)
+        error_message = f"SortBook workflow HTTP Error: {e.response.status_code} - {e.response.text}"
+        logger.error(error_message)
+        return _build_error_response("sortebook_v5", error_message), None
     except httpx.RequestError as e:
-        msg = f"Network error calling {source}: {e}"
-        logger.error(msg)
-        return _build_error_response(source, msg)
-
-# --- N8N Clients ---
-
-async def call_n8n_isbn_workflow(
-    isbn: str,
-    settings: Settings,
-    use_n8n_test: bool,
-    http_client: httpx.AsyncClient,
-    metadata: Optional[Dict[str, Any]] = None,
-    source_filename: Optional[str] = None,
-    isbn_candidates: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    """Calls the N8N webhook to enrich data from an ISBN."""
-    base_url = settings.n8n_test_base_url if use_n8n_test else settings.n8n_base_url
-    path = settings.n8n_test_isbn_path if use_n8n_test else settings.n8n_isbn_path
-    url = f"{base_url}{path}"
-    
-    payload = {"isbn": isbn, "metadata": metadata or {}, "isbn_candidates": isbn_candidates or []}
-    if source_filename:
-        payload["filename"] = source_filename
-    
-    return await _call_workflow(http_client, url, payload, "n8n_isbn")
-
-async def call_n8n_metadata_workflow(
-    metadata: Dict[str, Any],
-    settings: Settings,
-    use_n8n_test: bool,
-    http_client: httpx.AsyncClient,
-    source_filename: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Calls the N8N webhook to enrich data from metadata."""
-    base_url = settings.n8n_test_base_url if use_n8n_test else settings.n8n_base_url
-    path = settings.n8n_test_metadata_path if use_n8n_test else settings.n8n_metadata_path
-    url = f"{base_url}{path}"
-    
-    payload = {"title": metadata.get("title"), "author": metadata.get("creator")}
-    if source_filename:
-        payload["filename"] = source_filename
-        
-    return await _call_workflow(http_client, url, payload, "n8n_metadata")
-
-# --- Flowise Clients ---
-
-async def call_flowise_check_workflow(
-    collected_data: Dict[str, Any],
-    settings: Settings,
-    test_mode: bool,
-    http_client: httpx.AsyncClient,
-) -> Dict[str, Any]:
-    """Calls the Flowise webhook for a final consistency check."""
-    base_url = settings.flowise_test_base_url if test_mode else settings.flowise_base_url
-    flow_id = settings.flowise_test_check_id if test_mode else settings.flowise_check_id
-    url = f"{base_url}/api/v1/prediction/{flow_id}"
-
-    question = f"""
-    Data:
-    - Metadata Title: {collected_data.get('meta_title')}
-    - Metadata Author: {collected_data.get('meta_author')}
-    - ISBN Title: {collected_data.get('isbn_title')}
-    - ISBN Author: {collected_data.get('isbn_author')}
-    Task: Provide the most likely title and author in JSON format {{"title": "...", "author": "..."}}.
-    """
-    
-    payload = {"question": question}
-    return await _call_workflow(http_client, url, payload, "flowise_check")
-
-async def call_flowise_cover_workflow(
-    cover_content: bytes,
-    settings: Settings,
-    test_mode: bool,
-    http_client: httpx.AsyncClient,
-) -> Dict[str, Any]:
-    """Calls the Flowise webhook for cover image analysis."""
-    base_url = settings.flowise_test_base_url if test_mode else settings.flowise_base_url
-    flow_id = settings.flowise_test_cover_id if test_mode else settings.flowise_cover_id
-    url = f"{base_url}/api/v1/prediction/{flow_id}"
-
-    payload = {"question": "Analyze this book cover. Extract the title and author."}
-    files = {'file': ('cover.jpg', cover_content, 'image/jpeg')}
-    
-    return await _call_workflow(http_client, url, payload, "flowise_cover", files=files)
+        error_message = f"Network error calling SortBook workflow: {e}"
+        logger.error(error_message)
+        return _build_error_response("sortebook_v5", error_message), None
+    finally:
+        if not http_client and 'client' in locals() and not client.is_closed:
+            await client.aclose()

@@ -1,103 +1,99 @@
 # Architecture du Projet
 
-Ce document décrit l'architecture globale du projet `sortbook_v5`, ses composants principaux et leurs interactions.
+Ce document synthétise la nouvelle architecture du pipeline `sortbook_v5`, maintenant centrée sur une seule intégration côté n8n.
 
 ## Vue d'ensemble
 
-Le projet est conçu comme un pipeline de traitement de données ETL (Extract, Transform, Load) destiné à organiser une bibliothèque de livres numériques au format EPUB.
+Le traitement d'un EPUB suit trois grandes étapes :
 
-L'architecture repose sur plusieurs services conteneurisés avec Docker et un script principal en Python pour l'orchestration.
+1.  **Extraction locale** (hash, métadonnées, texte, couverture, ISBN...).
+2.  **Appel unique à n8n** via le workflow `sortebook_v5` : c’est lui qui orchestre les vérifications complémentaires (Flowise, API externes, règles heuristiques, etc.) et renvoie un titre/auteur final.
+3.  **Persistance** des données dans PostgreSQL + suivi Redis, avec un log de bord pour chaque fichier.
 
-## Composants Principaux
+Le code Python se concentre exclusivement sur l’extraction et l’interface avec PostgreSQL/Redis ; toute la logique d’enrichissement, de déduplication sensible ou d’appel à Flowise se trouve désormais dans n8n.
 
-![Diagramme d'architecture simplifié](https://placehold.co/800x400?text=Diagramme+d'architecture)
-*(Un diagramme réel montrerait les flux de données entre les composants)*
+## Composants principaux
 
 ### 1. Application Python (`src/`)
 
-C'est le cœur du système. Un script en ligne de commande (`src/main.py`) orchestre le pipeline de traitement pour chaque livre.
+- `src/main.py`: CLI Click qui :
+  - génère la liste des `.epub` (avec offset/limit et option Redis),
+  - contrôle les options `--dry-run`, `--reset`, `--n8n-test`,
+  - lance `src/core/pipeline.py` pour chaque fichier en mode séquentiel.
+- `src/core/pipeline.py`: pipeline allégé qui :
+  - calcule le SHA256 et vérifie les doublons `hash`/`ISBN` via PostgreSQL,
+  - extrait métadonnées, texte (limité à `text_preview_chars`), couverture et ISBN via `src/tasks/extract.py`,
+  - construit le payload JSON (voir plus bas) et appelle le webhook n8n `sortebook_v5`,
+  - stocke la réponse (champ `json_n8n_response`) et le titre/auteur final, puis met à jour la base et l’état Redis.
 
--   **Structure** : Le code est organisé dans un package (`src`) avec une séparation claire des responsabilités :
-    -   `main.py`: Interface CLI (Click) et orchestration de haut niveau.
-    -   `core/`: Logique métier principale, incluant `pipeline.py` (définit les étapes de traitement) et `state.py` (gestion de l'état avec Redis).
-    -   `tasks/`: Tâches atomiques du pipeline :
-        -   `extract.py`: Fonctions pour extraire des informations directement depuis le fichier EPUB (métadonnées, ISBN, couverture, hash...).
-        -   `integrate.py`: Clients HTTP pour communiquer avec des services externes (N8N, Flowise).
-    -   `db/`: Logique d'accès à la base de données (via `asyncpg`).
-    -   `config.py`: Gestion de la configuration via Pydantic, chargée depuis un fichier `.env`.
+- `src/tasks/extract.py`: toujours responsable des extractions brutes (hash, couverture propre, ISBN, métadonnées non transformées, aperçu textuel).
+- `src/tasks/integrate.py`: expose `call_n8n_sortebook_workflow` qui envoie tout le payload JSON à n8n et valide que `success` + `payload.title`/`payload.author` sont présents.
+- `src/db/database.py`: gère les inserts/updates dans le schéma `book_data.books`.
+- `src/core/reporting.py`: centralise la mise en forme des lignes de console.
 
--   **Fonctionnement** : Le pipeline exécute les étapes suivantes pour chaque livre :
-    1.  Calcul du hash du fichier.
-    2.  Vérification de l'existence de ce hash en base de données pour éviter les doublons.
-    3.  Extraction des métadonnées locales (titre, auteur, ISBN...).
-    4.  Appel à des services externes (workflows N8N) pour enrichir les données via l'ISBN ou les métadonnées.
-    5.  (Optionnel) Appel à des services d'IA (Flowise) pour des analyses plus complexes (validation, analyse de couverture).
-    6.  Prise de décision pour choisir le titre et l'auteur finaux uniquement à partir des workflows (`n8n_isbn`, `n8n_metadata`, Flowise…). Les métadonnées locales ne sont jamais utilisées comme fallback.
-    7.  Mise à jour de l'entrée du livre en base de données avec le statut final (`processed`, `failed`, `duplicate_isbn`).
+**Payload envoyé à n8n (`sortebook_v5`)**
 
--   **Exécution** :
-    -   Les EPUB sont traités séquentiellement afin de simplifier le suivi et la reprise.
-    -   L'option `--dry-run` exécute toutes les étapes (écriture en base, mise à jour Redis, appels externes) et n'évite que les déplacements de fichiers.
-    -   `--reset` réinitialise toujours le schéma PostgreSQL et l'état Redis, puis purge le dossier `logs/` avant d'initialiser le logging.
-    -   La console affiche une seule ligne par fichier, tandis que `logs/processing.log` conserve l'intégralité des détails (requêtes HTTP, erreurs, etc.).
+```json
+{
+  "file": {
+    "filename": "mon-livre.epub",
+    "path": "/chemin/vers/mon-livre.epub",
+    "size": 123456,
+    "hash": "abcdef123456..."
+  },
+  "metadata": { ... },         // structure brute retournée par ebooklib
+  "isbn": { ... },             // mêmes champs que IsbnData (isbn, source, candidats...)
+  "text_preview": { ... },     // champ text_preview, langue, etc.
+  "cover": {
+    "has_cover": true,
+    "cover_filename": "...",
+    "cover_media_type": "image/jpeg",
+    "width": 600,
+    "height": 800,
+    "format": "JPEG",
+    "content_base64": "...",    // base64 de l’image si disponible
+    ...
+  },
+  "dry_run": false,
+  "test_mode": false
+}
+```
 
-### 2. n8n (Service d'automatisation)
+Le workflow `sortebook_v5` peut appeler n’importe quel autre service (Flowise, API bibliographiques, etc.) et doit renvoyer un objet JSON standardisé :
 
--   **Rôle** : Fournit des workflows pour enrichir les données. Ces workflows sont exposés via des webhooks et appelés par l'application Python.
--   **Exemples de workflows** :
-    -   **Recherche par ISBN** : Prend un ISBN en entrée, interroge des APIs publiques (Google Books, OpenLibrary, etc.) et retourne une structure JSON standardisée avec le titre, l'auteur, la date de publication, etc.
-    -   **Recherche par métadonnées** : Prend un titre et un auteur, effectue une recherche textuelle sur les mêmes APIs et retourne les meilleures correspondances.
--   **Schéma de réponse attendu** : Chaque workflow (N8N ou Flowise) doit renvoyer un JSON respectant la structure suivante, afin d'être consommé correctement par `src/main.py` :
+```json
+{
+  "success": true,
+  "source": "sortebook_v5",
+  "payload": {
+    "title": "Titre final",
+    "author": "Auteur final"
+  },
+  "errors": [],
+  "raw": { ... }
+}
+```
 
-    ```json
-    {
-      "success": true,
-      "source": "n8n_isbn",              // identifie le workflow (n8n_isbn, n8n_metadata, flowise_check, flowise_cover…)
-      "payload": {
-        "title": "Titre proposé",
-        "author": "Auteur proposé",
-        "language": "fr",                // champs additionnels optionnels
-        "publisher": "Maison d'édition",
-        "published_at": "2020-05-01",
-        "confidence": 0.82,              // score facultatif (0-1)
-        "extra": { ... }                 // zone libre pour des données spécifiques au workflow
-      },
-      "errors": [],                      // liste de messages en cas d'échec
-      "raw": { ... }                     // réponse brute éventuelle pour debug
-    }
-    ```
+La réponse est stockée dans PostgreSQL sous `json_n8n_response`; si `success=false`, le pipeline marque le livre `failed` et enregistre les erreurs.
 
-    - `success`: booléen obligatoire. `false` signifie que le workflow n'a pas produit de résultat exploitable.
-    - `source`: permet au pipeline d'identifier l'origine des données.
-    - `payload.title` / `payload.author`: champs prioritaires utilisés pour décider du titre/auteur final. Si `success=true`, ces champs devraient être présents.
-    - `errors`: utile pour tracer les problèmes. Si `success=false`, la CLI les logge.
-    - `raw`: facultatif, mais pratique pour garder la réponse originale (non stockée si elle contient des données sensibles).
+### 2. n8n (service d’automatisation)
 
-    Toute évolution de ce format doit être synchronisée entre les workflows et le client Python.
--   **Stratégie d'appel** :
-    1. Si un ISBN normalisé est extrait, le workflow `n8n_isbn` est appelé en premier avec : l'ISBN principal, la liste complète des ISBN candidats, les métadonnées brutes et le nom de fichier.
-    2. Si `n8n_isbn` renvoie `success: true`, les données retournées sont utilisées pour finaliser le traitement (aucun autre workflow n'est appelé).
-    3. Si aucun ISBN n'est trouvé ou si `n8n_isbn` échoue (`success: false`), le workflow `n8n_metadata` est appelé avec les métadonnées brutes et le nom du fichier.
-    4. L'intégration Flowise (check / cover) pourra être branchée suivant les mêmes règles de format lorsque nécessaire.
--   **Déploiement** : Tourne dans un conteneur Docker et ses données sont persistées dans le dossier `data/n8n/`.
+- `n8n` expose un seul webhook (`sortebook_v5`) qui reçoit l’intégralité des données extraites.
+- C’est ce workflow qui peut contacter Flowise, mettre en œuvre des règles métier et valider les doublons intelligemment.
+- Il renvoie toujours les champs requis (`success`, `source`, `payload.{title,author}`) pour que l’application Python puisse clore le traitement.
 
-### 3. PostgreSQL (Base de données)
+### 3. PostgreSQL
 
--   **Rôle** : Stocke toutes les informations relatives aux livres traités. C'est la source de vérité du système.
--   **Schéma (`database/schema.sql`)** : La table principale `books` contient :
-    -   Les informations de base du fichier (nom, chemin, taille, hash).
-    -   L'état du traitement (`pending`, `processed`, `failed`, `duplicate_hash`, `duplicate_isbn`).
-    -   Toutes les données extraites et enrichies, souvent stockées dans des colonnes de type `JSONB` pour plus de flexibilité.
-    -   Les données finales choisies (titre, auteur).
--   **Déploiement** : Il est supposé qu'une instance de PostgreSQL est disponible (par exemple, lancée via le `docker-toolkit`).
+- Schéma principal `book_data.books` (voir `database/schema.sql`). Il conserve : hash, chemin, métadonnées brutes (`json_extract_*`), réponse n8n (`json_n8n_response`), statut (`pending`, `processed`, `duplicate_hash`, `duplicate_isbn`, `failed`) et décision finale (`final_title`, `final_author`, `choice_source`).
+- Le pipeline écrit l’entrée `pending` puis la met à jour après traitement.
+- L’option `--reset` tronque complètement ce schéma via `scripts/init_db.py`.
 
-### 4. Redis (Gestionnaire d'état)
+### 4. Redis
 
--   **Rôle** : Utilisé de manière optionnelle pour la reprise sur erreur.
--   **Fonctionnement** : Stocke l'identifiant (chemin de fichier) de chaque livre qui a été traité. Au démarrage d'un nouveau traitement, le script peut demander à Redis la liste des fichiers déjà traités pour les ignorer, évitant ainsi un travail redondant.
+- Stocke la liste `book_processor:processed_files` pour ignorer les EPUB déjà traités quand `--use-redis` est activé.
+- `src/core/state.py` gère la connexion, l’ajout et la réinitialisation de cet ensemble.
 
-### 5. Traefik (Reverse Proxy)
+### 5. Traefik
 
--   **Rôle** : Expose de manière sécurisée les services web, notamment l'interface de **n8n**.
--   **Fonctionnement** : Route les requêtes basées sur le nom d'hôte (ex: `n8n.mondomaine.local`) vers le conteneur Docker approprié et gère automatiquement la génération de certificats SSL/TLS.
--   **Déploiement** : Externe à ce projet, typiquement fourni par `docker-toolkit`.
+- Route les appels vers l’instance n8n (et Flowise si tu en as besoin) dans ton environnement Docker local.
+- Tes règles Traefik doivent exposer `n8n.mondomaine.local` ou l’équivalent que tu renseignes dans `config/config.yaml`.

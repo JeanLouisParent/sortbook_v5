@@ -17,8 +17,6 @@ BOOK_UPDATE_COLUMNS = {
     "isbn",
     "isbn_source",
     "has_cover",
-    "text_preview",
-    "epub_metadata",
     "choice_source",
     "final_author",
     "final_title",
@@ -27,12 +25,9 @@ BOOK_UPDATE_COLUMNS = {
     "processing_time_ms",
     "error_message",
     "json_extract_isbn",
-    "json_extract_text",
+    "json_extract_metadata",
     "json_extract_cover",
-    "json_n8n_isbn",
-    "json_n8n_metadata",
-    "json_flowise_cover",
-    "json_flowise_check",
+    "json_n8n_response",
 }
 
 async def create_pool(settings: Settings) -> Optional[Pool]:

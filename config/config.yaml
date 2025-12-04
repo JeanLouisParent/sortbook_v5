@@ -7,7 +7,6 @@ app:
 paths:
   book_sources: "/home/antares/project/livres"
   book_target: "/home/antares/project/livres_sorted"
-  epub_directory: "/home/antares/project/livres"
 
 database:
   dsn: "postgresql://user:password@localhost:5432/sortbook_db"
@@ -21,13 +20,22 @@ services:
   n8n:
     prod_url: "https://n8n.antares.local/webhook/"
     test_url: "https://n8n.antares.local/webhook-test/"
-    isbn_path: "isbn-lookup"
-    metadata_path: "metadata-lookup"
+    workflow_path: "sortebook_v5"
     verify_ssl: false
-  flowise:
-    base_url: "https://flowise.antares.local"
-    check_flow_id: "your_flowise_check_flow_id"
-    cover_flow_id: "your_flowise_cover_flow_id"
+
+ocr:
+  languages:
+    - fr
+    - en
+  use_gpu: true
+  max_chars: 3000
+  detail: 0
+  paragraph: false
+  contrast_ths: 0.05
+  adjust_contrast: 0.6
+  text_threshold: 0.35
+  low_text: 0.3
+  link_threshold: 0.6
 
 commands:
   run:

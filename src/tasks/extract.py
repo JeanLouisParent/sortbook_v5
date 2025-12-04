@@ -5,8 +5,9 @@ import io
 import logging
 import re
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional, Tuple
 import hashlib
+import base64
 
 import ebooklib
 from ebooklib import epub
@@ -58,6 +59,26 @@ def extract_cover(book: epub.EpubBook, file_path: Path) -> CoverData:
             return CoverData(has_cover=False)
 
         image_bytes = cover_item.get_content()
+        cover_filename = None
+        cover_media_type = None
+
+        get_name = getattr(cover_item, "get_name", None)
+        if callable(get_name):
+            cover_filename = get_name()
+        else:
+            cover_filename = getattr(cover_item, "file_name", None)
+
+        get_media_type = getattr(cover_item, "get_media_type", None)
+        if callable(get_media_type):
+            cover_media_type = get_media_type()
+        else:
+            cover_media_type = getattr(cover_item, "media_type", None)
+
+        if cover_media_type and "svg" in cover_media_type.lower():
+            return CoverData(has_cover=False)
+
+        if cover_filename and cover_filename.lower().endswith(".svg"):
+            return CoverData(has_cover=False)
         
         try:
             with Image.open(io.BytesIO(image_bytes)) as img:
@@ -69,8 +90,8 @@ def extract_cover(book: epub.EpubBook, file_path: Path) -> CoverData:
 
         return CoverData(
             has_cover=True,
-            cover_filename=getattr(cover_item, "file_name", None),
-            cover_media_type=getattr(cover_item, "media_type", None),
+            cover_filename=cover_filename,
+            cover_media_type=cover_media_type,
             cover_content=image_bytes,
             width=width,
             height=height,
@@ -79,6 +100,72 @@ def extract_cover(book: epub.EpubBook, file_path: Path) -> CoverData:
     except Exception as e:
         logger.error(f"Error extracting cover from {file_path.name}: {e}")
         return CoverData(has_cover=False, error=str(e))
+
+def extract_cover_images(book: epub.EpubBook, file_path: Path) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Extracts every image from the EPUB, encodes it, and identifies the primary candidate.
+    """
+    doc_items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))[:3]
+    image_lookup: Dict[str, int] = {}
+    for order, doc in enumerate(doc_items):
+        content = doc.get_content()
+        soup = BeautifulSoup(content, "html.parser")
+        for img in soup.find_all("img"):
+            src = img.get("src")
+            if not src:
+                continue
+            cleaned = src.split("#")[0].split("?")[0]
+            normalized = Path(cleaned).name
+            image_lookup[normalized] = min(order, image_lookup.get(normalized, order))
+
+    ordered_images: List[Tuple[float, Dict[str, Any]]] = []
+    for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
+        try:
+            image_bytes = item.get_content()
+        except Exception as e:
+            logger.warning(f"Impossible de lire l'image {item} dans {file_path.name}: {e}")
+            continue
+
+        cover_filename = getattr(item, "file_name", None) or ""
+        cover_media_type = getattr(item, "media_type", None)
+        normalized_name = Path(cover_filename).name if cover_filename else ""
+        if cover_media_type and "svg" in cover_media_type.lower():
+            continue
+        if normalized_name.lower().endswith(".svg"):
+            continue
+
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                width, height = img.size
+                image_format = img.format
+        except Exception as img_err:
+            logger.warning(f"Impossible de parser l'image {file_path.name}: {img_err}")
+            width = height = None
+            image_format = None
+
+        if width and height and (width < 300 or height < 300):
+            continue
+
+        order_index = image_lookup.get(normalized_name)
+        payload = {
+            "filename": cover_filename,
+            "media_type": cover_media_type,
+            "width": width,
+            "height": height,
+            "format": image_format,
+            "bytes": image_bytes,
+        }
+
+        priority = float("inf") if order_index is None else float(order_index)
+        ordered_images.append((priority, payload))
+
+    ordered_images.sort(key=lambda pair: (pair[0], -(pair[1].get("width") or 0)))
+    images_payload = [payload for _, payload in ordered_images]
+    primary = images_payload[0] if images_payload else None
+    if primary:
+        primary["primary"] = True
+
+    return images_payload, primary
 
 # --- ISBN Extraction ---
 

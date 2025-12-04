@@ -25,6 +25,7 @@ from src.config import settings
 from src.logging_config import setup_logging
 from src.db import database as db
 from src.core import pipeline
+from src.core.reporting import format_file_line, has_any_metadata
 from src.core.state import RedisStateManager
 
 logger = logging.getLogger(__name__)
@@ -38,41 +39,6 @@ def _purge_logs():
         for log_file in logs_dir.glob("*"):
             if log_file.is_file():
                 log_file.unlink()
-
-
-def _workflow_has_payload(entry: Optional[Dict[str, Any]]) -> bool:
-    return bool(
-        isinstance(entry, dict)
-        and entry.get("success")
-        and isinstance(entry.get("payload"), dict)
-    )
-
-
-def _format_file_line(
-    filename: str,
-    has_isbn: bool,
-    has_metadata: bool,
-    processed: bool,
-    process_origin: str,
-) -> str:
-    def _label(value: bool) -> str:
-        return "oui" if value else "non"
-
-    origin = process_origin or "inconnu"
-    return (
-        f"{filename} | isbn={_label(has_isbn)} | metadata={_label(has_metadata)} | "
-        f"traité={_label(processed)} | par={origin}"
-    )
-
-
-def _has_any_metadata(result: Dict[str, Any]) -> bool:
-    if _workflow_has_payload(result.get("json_n8n_isbn")):
-        return True
-    if _workflow_has_payload(result.get("json_n8n_metadata")):
-        return True
-    extract_metadata = result.get("json_extract_metadata")
-    metadata = extract_metadata.get("metadata") if isinstance(extract_metadata, dict) else None
-    return bool(metadata)
 
 
 def _iter_epub_files(base_dir: Path) -> Iterator[Path]:
@@ -283,13 +249,13 @@ async def main_process(
                 await redis_manager.add_processed_file(file_path)
 
             has_isbn = bool(result.get("isbn"))
-            has_metadata = _has_any_metadata(result)
+            has_metadata = has_any_metadata(result)
             processed_flag = status == "processed"
-            process_origin = (result.get("choice_source") or "unknown") if processed_flag else status
+            process_origin = result.get("choice_source") or status or "inconnu"
 
             _maybe_separator()
             logger.info(
-                _format_file_line(
+                format_file_line(
                     file_name,
                     has_isbn,
                     has_metadata,

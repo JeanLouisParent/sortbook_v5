@@ -1,24 +1,33 @@
 """
-Orchestration du pipeline de traitement pour un seul fichier EPUB.
+Pipeline minimaliste : extraction locale puis un seul appel n8n.
 """
+import base64
 import datetime
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 import httpx
 from asyncpg.pool import Pool
 from ebooklib import epub
 
 from src.config import Settings
-from src.core.models import WorkflowResponse
+from src.core.models import (
+    CoverData,
+    ExtractionResult,
+    IsbnData,
+    TextPreviewData,
+    WorkflowResponse,
+)
 from src.db import database as db
-from src.tasks import extract, integrate
+from src.tasks import extract, integrate, ocr
 
 logger = logging.getLogger(__name__)
 
+
 class PipelineState:
     """Contient l'état et les données collectées pour un fichier."""
+
     def __init__(self, file_path: Path, settings: Settings):
         self.file_path = file_path
         self.settings = settings
@@ -26,114 +35,163 @@ class PipelineState:
         self.data: Dict[str, Any] = {}
         self.final_status: str = "pending"
         self.error_message: Optional[str] = None
-        self.book: Optional[epub.EpubBook] = None
-        self.n8n_isbn_response: Optional[WorkflowResponse] = None
-        self.n8n_metadata_response: Optional[WorkflowResponse] = None
+        self.cover_images: List[Dict[str, Any]] = []
+        self.primary_cover: Optional[Dict[str, Any]] = None
+        self.n8n_response: Optional[WorkflowResponse] = None
 
-def _choose_final_data(state: PipelineState) -> Tuple[str, str, str]:
-    """Logique de décision pour choisir le titre/auteur final à partir des workflows externes."""
-    if state.n8n_isbn_response and state.n8n_isbn_response.success and state.n8n_isbn_response.payload:
-        logger.debug(f"Choix final pour {state.file_path.name}: N8N ISBN")
-        return state.n8n_isbn_response.payload.title, state.n8n_isbn_response.payload.author, "n8n_isbn"
 
-    if state.n8n_metadata_response and state.n8n_metadata_response.success and state.n8n_metadata_response.payload:
-        logger.debug(f"Choix final pour {state.file_path.name}: N8N metadata workflow")
-        return state.n8n_metadata_response.payload.title, state.n8n_metadata_response.payload.author, "n8n_metadata"
+def _is_svg(image: Dict[str, Any]) -> bool:
+    filename = (image.get("filename") or "").lower()
+    media_type = (image.get("media_type") or "").lower()
+    if filename.endswith(".svg") or "svg" in media_type:
+        return True
+    bytes_data = image.get("bytes")
+    if isinstance(bytes_data, (bytes, bytearray)):
+        start = bytes_data.lstrip()
+        if start.lower().startswith(b"<svg"):
+            return True
+    return False
 
-    logger.warning(f"Impossible de déterminer un titre/auteur pour {state.file_path.name}")
-    return "Unknown", "Unknown", "unknown"
+
+def _build_cover_payload(state: PipelineState) -> Dict[str, Any]:
+    cover_meta = state.data.get("json_extract_cover") or {}
+
+    def _serialize(image: Dict[str, Any], include_base64: bool) -> Dict[str, Any]:
+        entry = {
+            "filename": image.get("filename"),
+            "media_type": image.get("media_type"),
+            "width": image.get("width"),
+            "height": image.get("height"),
+            "format": image.get("format"),
+        }
+        bytes_value = image.get("bytes")
+        entry["content_base64"] = (
+            base64.b64encode(bytes_value).decode("ascii") if bytes_value and include_base64 else None
+        )
+        return entry
+
+    filtered_images = [img for img in state.cover_images if not _is_svg(img)]
+    primary_candidate = state.primary_cover if state.primary_cover and not _is_svg(state.primary_cover) else None
+    if not primary_candidate and filtered_images:
+        primary_candidate = filtered_images[0]
+
+    images = [_serialize(img, include_base64=False) for img in filtered_images]
+    primary = _serialize(primary_candidate, include_base64=True) if primary_candidate else None
+
+    return {
+        "primary": primary,
+        "images": images,
+        **({"selected": cover_meta} if cover_meta else {}),
+    }
+
+
+def _build_n8n_payload(state: PipelineState, dry_run: bool, test_mode: bool) -> Dict[str, Any]:
+    file_stats = {
+        "filename": state.file_path.name,
+        "path": str(state.file_path),
+        "size": state.file_path.stat().st_size,
+        "hash": state.data.get("file_hash"),
+    }
+
+    return {
+        "file": file_stats,
+        "metadata": state.data.get("json_extract_metadata"),
+        "isbn": state.data.get("json_extract_isbn"),
+        "text_preview": state.data.get("json_extract_text"),
+        "cover": _build_cover_payload(state),
+        "image_ocr": state.data.get("image_ocr"),
+        "dry_run": dry_run,
+        "test_mode": test_mode,
+    }
+
 
 async def _extract_local_data(state: PipelineState):
-    """Charge le livre et en extrait toutes les données locales."""
+    """Charge le livre et extrait les données locales."""
     try:
-        state.book = epub.read_epub(state.file_path)
-    except Exception as e:
-        logger.error(f"Impossible de lire le fichier EPUB {state.file_path.name}: {e}")
-        raise IOError(f"Invalid EPUB file: {e}")
+        book = epub.read_epub(state.file_path)
+    except Exception as exc:
+        logger.error("Impossible de lire le fichier EPUB %s: %s", state.file_path.name, exc)
+        raise
 
-    metadata_result = extract.extract_epub_metadata(state.book, state.file_path)
-    state.data["json_extract_metadata"] = metadata_result.model_dump()
-    state.data["epub_metadata"] = metadata_result.metadata.model_dump() if metadata_result.metadata else None
+    metadata_result: ExtractionResult = extract.extract_epub_metadata(book, state.file_path)
+    metadata_dump = metadata_result.model_dump()
+    state.data["json_extract_metadata"] = metadata_dump
+    state.data["epub_metadata"] = metadata_dump
 
-    isbn_data = extract.extract_isbn(state.book, state.file_path)
+    isbn_data: IsbnData = extract.extract_isbn(book, state.file_path)
     state.data["json_extract_isbn"] = isbn_data.model_dump()
     if isbn_data.isbn:
         state.data["isbn"] = isbn_data.isbn
         state.data["isbn_source"] = isbn_data.isbn_source
-        state.data["isbn_candidates"] = isbn_data.all_isbns
+        state.data["isbn_candidates"] = isbn_data.isbn_candidates
 
-    text_data = extract.extract_text_preview(state.book, state.file_path, state.settings.text_preview_chars)
-    state.data["json_extract_text"] = text_data.model_dump()
-    state.data["text_preview"] = text_data.text_preview
-    
-    cover_data = extract.extract_cover(state.book, state.file_path)
+    text_preview: TextPreviewData = extract.extract_text_preview(
+        book, state.file_path, state.settings.text_preview_chars
+    )
+    state.data["json_extract_text"] = text_preview.model_dump()
+    state.data["text_preview"] = text_preview.text_preview
+
+    cover_data: CoverData = extract.extract_cover(book, state.file_path)
+    state.cover_images, state.primary_cover = extract.extract_cover_images(book, state.file_path)
+    state.data["image_ocr"] = ocr.extract_text_from_images(
+        state.cover_images,
+        languages=state.settings.ocr_languages,
+        max_chars=state.settings.ocr_max_chars,
+        use_gpu=state.settings.ocr_use_gpu,
+        detail=state.settings.ocr_detail,
+        paragraph=state.settings.ocr_paragraph,
+        contrast_ths=state.settings.ocr_contrast_ths,
+        adjust_contrast=state.settings.ocr_adjust_contrast,
+        text_threshold=state.settings.ocr_text_threshold,
+        low_text=state.settings.ocr_low_text,
+        link_threshold=state.settings.ocr_link_threshold,
+    )
     state.data["has_cover"] = cover_data.has_cover
-    state.data["json_extract_cover"] = cover_data.model_dump(exclude={'cover_content'})
-    if cover_data.cover_content:
-        state.data["cover_content_bytes"] = cover_data.cover_content
+    state.data["json_extract_cover"] = cover_data.model_dump(exclude={"cover_content"})
 
-async def _enrich_data_from_apis(state: PipelineState, use_n8n_test: bool, http_client: httpx.AsyncClient):
-    """Appelle les API externes pour enrichir les données."""
-    if state.final_status in ["duplicate_hash", "duplicate_isbn"]:
-        return
 
-    metadata_payload = state.data.get("epub_metadata")
-    isbn_candidates = state.data.get("isbn_candidates", [])
-    
-    should_call_metadata_workflow = True
-    if state.data.get("isbn"):
-        isbn_response_dict = await integrate.call_n8n_isbn_workflow(
-            state.data["isbn"], state.settings, use_n8n_test, http_client,
-            metadata=metadata_payload, source_filename=state.file_path.name, isbn_candidates=isbn_candidates
-        )
-        state.n8n_isbn_response = WorkflowResponse.model_validate(isbn_response_dict)
-        state.data["json_n8n_isbn"] = state.n8n_isbn_response.model_dump()
-        if state.n8n_isbn_response.success:
-            should_call_metadata_workflow = False
+async def _call_n8n_workflow(
+    state: PipelineState,
+    dry_run: bool,
+    test_mode: bool,
+    http_client: httpx.AsyncClient,
+) -> Tuple[WorkflowResponse, Any]:
+    payload = _build_n8n_payload(state, dry_run, test_mode)
+    normalized, raw_result = await integrate.call_n8n_sortebook_workflow(
+        payload, state.settings, test_mode, http_client
+    )
+    parsed = WorkflowResponse.model_validate(normalized)
+    return parsed, raw_result
 
-    if metadata_payload and should_call_metadata_workflow:
-        metadata_response_dict = await integrate.call_n8n_metadata_workflow(
-            metadata_payload, state.settings, use_n8n_test, http_client, state.file_path.name
-        )
-        state.n8n_metadata_response = WorkflowResponse.model_validate(metadata_response_dict)
-        state.data["json_n8n_metadata"] = state.n8n_metadata_response.model_dump()
-
-def _finalize_processing(state: PipelineState):
-    """Détermine les données finales, le statut et nettoie l'état."""
-    if state.final_status == "pending":
-        final_title, final_author, choice_source = _choose_final_data(state)
-        state.data["final_title"] = final_title
-        state.data["final_author"] = final_author
-        state.data["choice_source"] = choice_source
-        
-        if choice_source != "unknown":
-            state.final_status = "processed"
-        else:
-            state.final_status = "failed"
-            state.error_message = "Impossible de déterminer le titre/auteur via les workflows."
-    
-    if "cover_content_bytes" in state.data:
-        del state.data["cover_content_bytes"]
 
 async def run_pipeline(
-    file_path: Path, pool: Pool, settings: Settings, dry_run: bool,
-    test_mode: bool, use_n8n_test: bool, http_client: httpx.AsyncClient,
-) -> "PipelineState":
-    """Exécute le pipeline complet pour un fichier EPUB."""
+    file_path: Path,
+    pool: Pool,
+    settings: Settings,
+    dry_run: bool,
+    test_mode: bool,
+    use_n8n_test: bool,
+    http_client: httpx.AsyncClient,
+):
+    """Exécute le pipeline pour un fichier EPUB."""
     start_time = datetime.datetime.now(datetime.timezone.utc)
     state = PipelineState(file_path, settings)
-    
+
     try:
         state.data["file_hash"] = extract.get_file_hash(file_path)
-        
+
         existing_book = await db.find_book_by_hash(pool, state.data["file_hash"])
         if existing_book:
             state.final_status = "duplicate_hash"
             state.data["status"] = state.final_status
-            return state
+            return state.data
 
         state.book_id = await db.create_book_entry(
-            pool, state.data["file_hash"], file_path.name, str(file_path), file_path.stat().st_size
+            pool,
+            state.data["file_hash"],
+            file_path.name,
+            str(file_path),
+            file_path.stat().st_size,
         )
 
         await _extract_local_data(state)
@@ -142,15 +200,33 @@ async def run_pipeline(
             existing_isbn = await db.find_book_by_isbn(pool, state.data["isbn"])
             if existing_isbn:
                 state.final_status = "duplicate_isbn"
-        
-        await _enrich_data_from_apis(state, use_n8n_test, http_client)
-        
-        _finalize_processing(state)
+                state.error_message = "ISBN déjà traité"
 
-    except (IOError, Exception) as e:
-        logger.exception(f"Erreur critique dans le pipeline pour {file_path.name}")
+        if state.final_status == "pending":
+            should_use_test = test_mode or use_n8n_test
+            state.n8n_response, raw_response = await _call_n8n_workflow(
+                state, dry_run, should_use_test, http_client
+            )
+            state.data["json_n8n_response"] = raw_response
+            state.data["json_n8n_response_parsed"] = state.n8n_response.model_dump()
+
+            if state.n8n_response.success and state.n8n_response.payload:
+                state.data["final_title"] = state.n8n_response.payload.title
+                state.data["final_author"] = state.n8n_response.payload.author
+                state.data["choice_source"] = state.n8n_response.source or "sortebook_v5"
+                state.final_status = "processed"
+            else:
+                errors = " ; ".join(state.n8n_response.errors or [])
+                state.error_message = errors or "SortBook workflow n8n a retourné une erreur"
+                state.final_status = "failed"
+        else:
+            state.data["json_n8n_response"] = None
+            state.data["json_n8n_response_parsed"] = None
+
+    except Exception as exc:
+        logger.exception("Erreur critique dans le pipeline pour %s", file_path.name)
         state.final_status = "failed"
-        state.error_message = str(e)
+        state.error_message = str(exc)
 
     finally:
         end_time = datetime.datetime.now(datetime.timezone.utc)
@@ -158,8 +234,8 @@ async def run_pipeline(
         state.data["error_message"] = state.error_message
         state.data["processing_completed_at"] = end_time
         state.data["processing_time_ms"] = int((end_time - start_time).total_seconds() * 1000)
-        
+
         if state.book_id:
             await db.update_book_entry(pool, state.book_id, state.data)
-    
-    return state
+
+    return state.data
