@@ -3,7 +3,7 @@ Gestion de l'état de la file de traitement avec Redis.
 Permet la reprise du traitement en cas d'interruption.
 """
 import logging
-from typing import Optional, List, Set
+from typing import Optional, Iterable, Iterator, Set
 from pathlib import Path
 
 import redis.asyncio as redis
@@ -46,7 +46,7 @@ class RedisStateManager:
             await self.redis_client.close()
             logger.info("Connexion Redis fermée.")
 
-    async def filter_processed_files(self, all_files: List[Path]) -> List[Path]:
+    async def filter_processed_files(self, all_files: Iterable[Path]) -> Iterable[Path]:
         """
         Filtre une liste de fichiers pour ne garder que ceux qui n'ont pas encore été traités.
         """
@@ -57,14 +57,18 @@ class RedisStateManager:
             processed_files_set: Set[str] = await self.redis_client.smembers(self._processed_key)
             if not processed_files_set:
                 return all_files
-            
-            files_to_process = [
-                file for file in all_files if str(file) not in processed_files_set
-            ]
-            
-            logger.info(f"{len(all_files) - len(files_to_process)} fichiers déjà traités ignorés grâce à Redis.")
-            return files_to_process
 
+            def _iter_filtered() -> Iterator[Path]:
+                skipped = 0
+                for file in all_files:
+                    if str(file) in processed_files_set:
+                        skipped += 1
+                        continue
+                    yield file
+
+            logger.info("Fichiers déjà traités ignorés grâce à Redis.")
+            return _iter_filtered()
+        
         except redis.RedisError as e:
             logger.error(f"Erreur Redis lors du filtrage des fichiers: {e}. Traitement de tous les fichiers.")
             return all_files

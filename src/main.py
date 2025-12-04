@@ -6,8 +6,10 @@ initialiser et interagir avec le pipeline.
 import asyncio
 import logging
 import sys
+from itertools import islice
 from pathlib import Path
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, Iterator
+import os
 import shutil
 
 # When executed directly (python src/main.py), ensure project root is on sys.path
@@ -71,6 +73,18 @@ def _has_any_metadata(result: Dict[str, Any]) -> bool:
     extract_metadata = result.get("json_extract_metadata")
     metadata = extract_metadata.get("metadata") if isinstance(extract_metadata, dict) else None
     return bool(metadata)
+
+
+def _iter_epub_files(base_dir: Path) -> Iterator[Path]:
+    """Itère paresseusement les fichiers EPUB dans l'ordre trié."""
+    if not base_dir.exists():
+        return
+
+    for dirpath, dirnames, filenames in os.walk(base_dir):
+        dirnames.sort()
+        for filename in sorted(filenames):
+            if filename.lower().endswith(".epub"):
+                yield Path(dirpath) / filename
 
 @click.group()
 def cli():
@@ -197,15 +211,17 @@ async def main_process(
         if test_file_path:
             files_to_process = [test_file_path]
         else:
-            all_files = sorted([p for p in settings.epub_dir.glob("**/*.epub") if p.is_file()])
-            
+            files_iter = _iter_epub_files(settings.epub_dir)
             if use_redis_state:
-                all_files = await redis_manager.filter_processed_files(all_files)
-            
-            # Appliquer offset et limit
-            start = offset
-            end = start + limit if limit > 0 else len(all_files)
-            files_to_process = all_files[start:end]
+                files_iter = await redis_manager.filter_processed_files(files_iter)
+
+            if offset > 0:
+                files_iter = islice(files_iter, offset, None)
+
+            if limit > 0:
+                files_iter = islice(files_iter, limit)
+
+            files_to_process = list(files_iter)
 
         if not files_to_process:
             logger.info("Aucun nouveau fichier à traiter.")

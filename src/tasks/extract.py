@@ -5,13 +5,15 @@ import io
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import List
 import hashlib
 
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from PIL import Image
+
+from src.core.models import CoverData, IsbnData, ExtractionResult, ExtractedMetadata, TextPreviewData
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +38,11 @@ def get_file_hash(file_path: Path) -> str:
 
 # --- Cover Extraction ---
 
-def extract_cover(file_path: Path) -> Dict[str, Any]:
+def extract_cover(book: epub.EpubBook, file_path: Path) -> CoverData:
     """
     Checks for cover existence, extracts its metadata, and returns its binary content.
     """
     try:
-        book = epub.read_epub(file_path, options={"ignore_ncx": True})
-        
         cover_item = None
         meta_cover = book.get_metadata('OPF', 'cover')
         if meta_cover:
@@ -55,23 +55,9 @@ def extract_cover(file_path: Path) -> Dict[str, Any]:
                 cover_item = images[0]
 
         if not cover_item:
-            return {"has_cover": False, "cover_content": None}
+            return CoverData(has_cover=False)
 
         image_bytes = cover_item.get_content()
-        cover_filename = None
-        cover_media_type = None
-
-        get_name = getattr(cover_item, "get_name", None)
-        if callable(get_name):
-            cover_filename = get_name()
-        else:
-            cover_filename = getattr(cover_item, "file_name", None)
-
-        get_media_type = getattr(cover_item, "get_media_type", None)
-        if callable(get_media_type):
-            cover_media_type = get_media_type()
-        else:
-            cover_media_type = getattr(cover_item, "media_type", None)
         
         try:
             with Image.open(io.BytesIO(image_bytes)) as img:
@@ -81,18 +67,18 @@ def extract_cover(file_path: Path) -> Dict[str, Any]:
             logger.warning(f"Could not parse cover image for {file_path.name}: {img_err}")
             width, height, image_format = None, None, None
 
-        return {
-            "has_cover": True,
-            "cover_filename": cover_filename,
-            "cover_media_type": cover_media_type,
-            "cover_content": image_bytes,
-            "width": width,
-            "height": height,
-            "format": image_format
-        }
+        return CoverData(
+            has_cover=True,
+            cover_filename=getattr(cover_item, "file_name", None),
+            cover_media_type=getattr(cover_item, "media_type", None),
+            cover_content=image_bytes,
+            width=width,
+            height=height,
+            format=image_format
+        )
     except Exception as e:
         logger.error(f"Error extracting cover from {file_path.name}: {e}")
-        return {"has_cover": False, "cover_content": None, "error": str(e)}
+        return CoverData(has_cover=False, error=str(e))
 
 # --- ISBN Extraction ---
 
@@ -130,25 +116,18 @@ def _find_isbns_in_text(text: str) -> List[str]:
             found_isbns.append(normalized)
     return list(dict.fromkeys(found_isbns))
 
-def extract_isbn(file_path: Path) -> Dict[str, Any]:
+def extract_isbn(book: epub.EpubBook, file_path: Path) -> IsbnData:
     """
     Extracts ISBN from an EPUB file, first from metadata, then from content.
     """
     try:
-        book = epub.read_epub(file_path)
-
         identifiers = book.get_metadata("DC", "identifier")
         for identifier, _ in identifiers:
             if "isbn" in identifier.lower() or _is_valid_isbn(identifier):
                 clean_isbn = _normalize_isbn(identifier.replace("urn:isbn:", "").strip())
                 if _is_valid_isbn(clean_isbn):
                     logger.debug(f"ISBN found in metadata for {file_path.name}: {clean_isbn}")
-                    return {
-                        "isbn": clean_isbn,
-                        "isbn_source": "metadata",
-                        "all_isbns": [clean_isbn],
-                        "isbn_candidates": [clean_isbn],
-                    }
+                    return IsbnData(isbn=clean_isbn, isbn_source="metadata", all_isbns=[clean_isbn], isbn_candidates=[clean_isbn])
 
         all_found_isbns = []
         items_to_scan = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))[:5]
@@ -164,29 +143,23 @@ def extract_isbn(file_path: Path) -> Dict[str, Any]:
             isbn13 = next((isbn for isbn in unique_isbns if len(isbn) == 13), None)
             chosen_isbn = isbn13 or unique_isbns[0]
             logger.debug(f"ISBN found in content of {file_path.name}: {chosen_isbn}")
-            return {
-                "isbn": chosen_isbn,
-                "isbn_source": "content",
-                "all_isbns": unique_isbns,
-                "isbn_candidates": unique_isbns,
-            }
+            return IsbnData(isbn=chosen_isbn, isbn_source="content", all_isbns=unique_isbns, isbn_candidates=unique_isbns)
 
         logger.debug(f"No ISBN found for {file_path.name}")
-        return {"isbn": None, "isbn_source": "none", "all_isbns": [], "isbn_candidates": []}
+        return IsbnData()
 
     except Exception as e:
         logger.error(f"Error extracting ISBN from {file_path.name}: {e}")
-        return {"isbn": None, "isbn_source": "error", "all_isbns": [], "isbn_candidates": [], "error": str(e)}
+        return IsbnData(error=str(e))
 
 # --- Metadata Extraction ---
 
-def extract_epub_metadata(file_path: Path) -> Dict[str, Any]:
+def extract_epub_metadata(book: epub.EpubBook, file_path: Path) -> ExtractionResult:
     """
     Extracts metadata from an EPUB file.
     """
     try:
-        book = epub.read_epub(file_path)
-        metadata = {
+        raw_metadata = {
             "title": book.get_metadata("DC", "title"),
             "creator": book.get_metadata("DC", "creator"),
             "publisher": book.get_metadata("DC", "publisher"),
@@ -196,21 +169,22 @@ def extract_epub_metadata(file_path: Path) -> Dict[str, Any]:
             "description": book.get_metadata("DC", "description"),
             "subjects": book.get_metadata("DC", "subject"),
         }
-        for key, value in metadata.items():
+        cleaned_metadata = {}
+        for key, value in raw_metadata.items():
             if isinstance(value, list) and value:
                 if len(value) == 1:
-                    metadata[key] = value[0][0] if isinstance(value[0], tuple) else value[0]
+                    cleaned_metadata[key] = value[0][0] if isinstance(value[0], tuple) else value[0]
                 else:
-                    metadata[key] = [v[0] if isinstance(v, tuple) else v for v in value]
-
-        return {"metadata": metadata}
+                    cleaned_metadata[key] = [v[0] if isinstance(v, tuple) else v for v in value]
+        
+        return ExtractionResult(metadata=ExtractedMetadata(**cleaned_metadata))
     except Exception as e:
         logger.error(f"Could not extract metadata from {file_path.name}: {e}")
-        return {"error": str(e)}
+        return ExtractionResult(error=str(e))
 
 # --- Text Preview Extraction ---
 
-def extract_text_preview(file_path: Path, max_chars: int) -> Dict[str, Any]:
+def extract_text_preview(book: epub.EpubBook, file_path: Path, max_chars: int) -> TextPreviewData:
     """
     Extracts the first characters of text content from an EPUB.
     """
@@ -218,7 +192,6 @@ def extract_text_preview(file_path: Path, max_chars: int) -> Dict[str, Any]:
     current_length = 0
 
     try:
-        book = epub.read_epub(file_path)
         items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
 
         for item in items:
@@ -241,11 +214,14 @@ def extract_text_preview(file_path: Path, max_chars: int) -> Dict[str, Any]:
         full_text = "".join(text_content)
         preview = full_text[:max_chars]
 
-        return {
-            "text_preview": preview,
-            "extracted_chars": len(preview),
-            "language": book.get_metadata("DC", "language")[0][0] if book.get_metadata("DC", "language") else None
-        }
+        lang_meta = book.get_metadata("DC", "language")
+        language = lang_meta[0][0] if lang_meta and lang_meta[0] else None
+
+        return TextPreviewData(
+            text_preview=preview,
+            extracted_chars=len(preview),
+            language=language
+        )
     except Exception as e:
         logger.error(f"Could not extract text from {file_path.name}: {e}")
-        return {"text_preview": None, "extracted_chars": 0, "error": str(e)}
+        return TextPreviewData(error=str(e))
