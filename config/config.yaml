@@ -4,6 +4,17 @@ app:
   text_preview_chars: 10000
   request_timeout: 180
 
+commands:
+  run:
+    dry_run: true
+    test_file:
+    limit: 0
+    offset: 0
+    use_redis: false
+    verbose: false
+    reset: true
+    n8n_test: false
+
 paths:
   book_sources: "/home/antares/project/livres"
   book_target: "/home/antares/project/livres_sorted"
@@ -36,14 +47,3 @@ ocr:
   text_threshold: 0.35
   low_text: 0.3
   link_threshold: 0.6
-
-commands:
-  run:
-    dry_run: true
-    test_file:
-    limit: 0
-    offset: 0
-    use_redis: false
-    verbose: false
-    reset: true
-    n8n_test: false
