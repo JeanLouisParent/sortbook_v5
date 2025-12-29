@@ -35,27 +35,20 @@ Le code Python se concentre exclusivement sur l’extraction et l’interface av
 
 ```json
 {
-  "file": {
-    "filename": "mon-livre.epub",
-    "path": "/chemin/vers/mon-livre.epub",
-    "size": 123456,
-    "hash": "abcdef123456..."
-  },
+  "filename": "mon-livre.epub",
   "metadata": { ... },         // structure brute retournée par ebooklib
-  "isbn": { ... },             // mêmes champs que IsbnData (isbn, source, candidats...)
-  "text_preview": { ... },     // champ text_preview, langue, etc.
-  "cover": {
-    "has_cover": true,
-    "cover_filename": "...",
-    "cover_media_type": "image/jpeg",
-    "width": 600,
-    "height": 800,
-    "format": "JPEG",
-    "content_base64": "...",    // base64 de l’image si disponible
-    ...
+  "isbn": {
+    "metadata": ["978..."],
+    "text": [],
+    "ocr": ["978..."]
   },
-  "dry_run": false,
-  "test_mode": false
+  "text_preview": "Extrait du texte...",
+  "ocr": [
+    {
+      "filename": "cover.jpg",
+      "text": "ISBN 978..."
+    }
+  ]
 }
 ```
 

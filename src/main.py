@@ -124,7 +124,7 @@ def run_command(
     if reset:
         _purge_logs()
     setup_logging(verbose)
-    
+
     if dry_run:
         logger.info("Lancement en mode --dry-run. Aucune modification ne sera persistée.")
 
@@ -228,7 +228,7 @@ async def main_process(
                 logger.error(f"Erreur non gérée pour {file_path}: {result}")
                 _maybe_separator()
                 logger.info(
-                    _format_file_line(file_name, False, False, False, "exception"),
+                    format_file_line(file_name, False, False, False, "exception"),
                     extra={"plain": True},
                 )
                 printed_any = True
@@ -237,7 +237,7 @@ async def main_process(
             if not isinstance(result, dict):
                 _maybe_separator()
                 logger.info(
-                    _format_file_line(file_name, False, False, False, "inconnu"),
+                    format_file_line(file_name, False, False, False, "inconnu"),
                     extra={"plain": True},
                 )
                 printed_any = True
@@ -277,12 +277,12 @@ async def main_process(
 def list_pending():
     """Liste les fichiers marqués comme 'pending' dans la base de données."""
     setup_logging(verbose=False)
-    
+
     async def _list_pending():
         pool = await db.create_pool(settings)
         if not pool:
             return
-        
+
         try:
             pending_books = await db.get_pending_books(pool)
             if not pending_books:

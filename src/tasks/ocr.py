@@ -12,7 +12,7 @@ except ImportError:  # fallback when dependencies not installed yet
     easyocr = None  # type: ignore
     np = None  # type: ignore
 
-from PIL import Image
+from PIL import Image, ImageOps, ImageEnhance
 
 logger = logging.getLogger(__name__)
 _reader_cache: Dict[Tuple[Tuple[str, ...], bool], "easyocr.Reader"] = {}
@@ -47,6 +47,33 @@ def extract_text_from_images(
     low_text: float = 0.4,
     link_threshold: float = 0.4,
 ) -> List[Dict[str, Any]]:
+    def _resize_if_needed(image: Image.Image, min_dim: int = 1000) -> Image.Image:
+        width, height = image.size
+        current_min = min(width, height)
+        if current_min >= min_dim:
+            return image
+        scale = min(2.5, float(min_dim) / float(current_min))
+        new_size = (int(width * scale), int(height * scale))
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        return image.resize(new_size, resampling)
+
+    def _preprocess_variants(image: Image.Image) -> List[Image.Image]:
+        variants: List[Image.Image] = [image]
+        gray = ImageOps.grayscale(image)
+        variants.append(gray)
+        auto = ImageOps.autocontrast(gray)
+        variants.append(auto)
+        enhanced = ImageEnhance.Contrast(auto).enhance(1.8)
+        enhanced = ImageEnhance.Sharpness(enhanced).enhance(1.5)
+        variants.append(enhanced)
+        variants.append(_resize_if_needed(enhanced))
+        return variants
+
+    def _pick_best_text(texts: List[str]) -> str:
+        if not texts:
+            return ""
+        return max(texts, key=lambda value: len(value))
+
     global _ocr_warning_logged
     if not OCR_AVAILABLE:
         if not _ocr_warning_logged:
@@ -71,23 +98,29 @@ def extract_text_from_images(
             logger.warning("Impossible d'ouvrir l'image OCR %s : %s", image.get("filename"), exc)
             continue
 
+        variants = _preprocess_variants(pil_image)
+        collected_texts: List[str] = []
         try:
-            array = np.asarray(pil_image)
-            text_blocks = reader.readtext(
-                array,
-                detail=detail,
-                paragraph=paragraph,
-                contrast_ths=contrast_ths,
-                adjust_contrast=adjust_contrast,
-                text_threshold=text_threshold,
-                low_text=low_text,
-                link_threshold=link_threshold,
-            )
+            for variant in variants:
+                array = np.asarray(variant)
+                text_blocks = reader.readtext(
+                    array,
+                    detail=detail,
+                    paragraph=paragraph,
+                    contrast_ths=contrast_ths,
+                    adjust_contrast=adjust_contrast,
+                    text_threshold=text_threshold,
+                    low_text=low_text,
+                    link_threshold=link_threshold,
+                )
+                joined = " ".join(text_blocks).strip()
+                if joined:
+                    collected_texts.append(joined)
         except Exception as exc:
             logger.warning("EasyOCR a échoué sur %s : %s", image.get("filename"), exc)
             continue
 
-        joined = " ".join(text_blocks).strip()
+        joined = _pick_best_text(collected_texts)
         if not joined:
             continue
 
@@ -98,7 +131,6 @@ def extract_text_from_images(
             {
                 "filename": image.get("filename"),
                 "text": joined,
-                "confidence": float(len(joined)) / max_chars,
             }
         )
 

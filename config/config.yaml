@@ -16,8 +16,9 @@ commands:
     n8n_test: false
 
 paths:
-  book_sources: "/home/antares/project/livres"
+  book_sources: "/home/antares/project/livres_test_set"
   book_target: "/home/antares/project/livres_sorted"
+  book_test_set: "/home/antares/project/livres_test_set"
 
 database:
   dsn: "postgresql://user:password@localhost:5432/sortbook_db"

@@ -86,22 +86,50 @@ def _build_cover_payload(state: PipelineState) -> Dict[str, Any]:
 
 
 def _build_n8n_payload(state: PipelineState, dry_run: bool, test_mode: bool) -> Dict[str, Any]:
-    file_stats = {
-        "filename": state.file_path.name,
-        "path": str(state.file_path),
-        "size": state.file_path.stat().st_size,
-        "hash": state.data.get("file_hash"),
-    }
+    def _dedupe(values: List[str]) -> List[str]:
+        return list(dict.fromkeys(value for value in values if value))
+
+    def _collect_ocr_isbns() -> List[str]:
+        ocr_results = state.data.get("image_ocr") or []
+        found: List[str] = []
+        for entry in ocr_results:
+            text = entry.get("text")
+            if not text:
+                continue
+            found.extend(extract._find_isbns_in_text(text))
+        return _dedupe(found)
+
+    def _build_isbn_payload() -> Dict[str, List[str]]:
+        metadata_isbns: List[str] = []
+        text_isbns: List[str] = []
+        ocr_isbns = _collect_ocr_isbns()
+
+        isbn_data = state.data.get("json_extract_isbn") or {}
+        if isbn_data.get("isbn_source") == "metadata" and isbn_data.get("isbn"):
+            metadata_isbns = [isbn_data.get("isbn")]
+        elif isbn_data.get("isbn_source") == "content":
+            text_isbns = isbn_data.get("all_isbns") or []
+
+        sources: Dict[str, List[str]] = {"metadata": [], "text": [], "ocr": []}
+        seen: set[str] = set()
+        for source, values in (
+            ("metadata", _dedupe(metadata_isbns)),
+            ("text", _dedupe(text_isbns)),
+            ("ocr", _dedupe(ocr_isbns)),
+        ):
+            for value in values:
+                if value in seen:
+                    continue
+                sources[source].append(value)
+                seen.add(value)
+        return sources
 
     return {
-        "file": file_stats,
-        "metadata": state.data.get("json_extract_metadata"),
-        "isbn": state.data.get("json_extract_isbn"),
-        "text_preview": state.data.get("json_extract_text"),
-        "cover": _build_cover_payload(state),
-        "image_ocr": state.data.get("image_ocr"),
-        "dry_run": dry_run,
-        "test_mode": test_mode,
+        "filename": state.file_path.name,
+        "metadata": (state.data.get("json_extract_metadata") or {}).get("metadata"),
+        "isbn": _build_isbn_payload(),
+        "ocr": state.data.get("image_ocr"),
+        "text_preview": (state.data.get("json_extract_text") or {}).get("text_preview"),
     }
 
 

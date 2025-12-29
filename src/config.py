@@ -26,6 +26,7 @@ class AppConfig(BaseModel):
 class PathsConfig(BaseModel):
     book_sources: Path
     book_target: Path
+    book_test_set: Path
 
 class DatabaseConfig(BaseModel):
     dsn: PostgresDsn
@@ -113,6 +114,8 @@ class Settings(BaseModel):
             config_data.setdefault("paths", {})["book_sources"] = os.getenv("BOOK_SOURCES")
         if os.getenv("BOOK_TARGET"):
             config_data.setdefault("paths", {})["book_target"] = os.getenv("BOOK_TARGET")
+        if os.getenv("BOOK_TEST_SAMPLES"):
+            config_data.setdefault("paths", {})["book_test_set"] = os.getenv("BOOK_TEST_SAMPLES")
 
         # App settings
         if os.getenv("APP_NAME"):
@@ -177,6 +180,10 @@ class Settings(BaseModel):
     @property
     def epub_dir(self) -> Path:
         return Path(self.paths.book_sources).expanduser()
+
+    @property
+    def test_samples_dir(self) -> Path:
+        return Path(self.paths.book_test_set).expanduser()
 
     @property
     def postgres_dsn(self) -> PostgresDsn:

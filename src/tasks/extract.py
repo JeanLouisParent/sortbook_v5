@@ -210,6 +210,8 @@ def extract_isbn(book: epub.EpubBook, file_path: Path) -> IsbnData:
     try:
         identifiers = book.get_metadata("DC", "identifier")
         for identifier, _ in identifiers:
+            if not identifier:
+                continue
             if "isbn" in identifier.lower() or _is_valid_isbn(identifier):
                 clean_isbn = _normalize_isbn(identifier.replace("urn:isbn:", "").strip())
                 if _is_valid_isbn(clean_isbn):
